@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 def main():
+    """Package the add-in and required resources, excluding development caches."""
     root = Path(__file__).resolve().parents[1]
     addin = root / 'FusionFreeDeburr'
     manifest = json.loads((addin / 'FusionFreeDeburr.manifest').read_text(encoding='utf-8'))

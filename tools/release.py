@@ -17,6 +17,7 @@ SEMVER = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9
 
 
 def validate_version(version):
+    """Reject unsupported SemVer forms before using a version in paths or URLs."""
     match = SEMVER.fullmatch(version)
     if not match or (match[4] and any(p.isdigit() and len(p) > 1 and p[0] == '0' for p in match[4].split('.'))):
         raise ValueError('Expected SemVer without v or build metadata')
@@ -28,6 +29,7 @@ def digest(data):
 
 
 def build_assets(root, version, source_sha, repository):
+    """Stamp the packaged version, restore source, and emit verified update assets."""
     validate_version(version)
     if not re.fullmatch(r'[0-9a-f]{40}', source_sha):
         raise ValueError('Source SHA must be a full commit ID')
@@ -75,6 +77,7 @@ def build_assets(root, version, source_sha, repository):
 
 class AssetRedirects(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
+        """Allow HTTPS redirects without forwarding credentials to asset hosts."""
         if urlparse(newurl).scheme != 'https':
             raise ValueError('Refusing an insecure asset redirect')
         redirected = super().redirect_request(request, fp, code, msg, headers, newurl)
@@ -90,6 +93,7 @@ class GitHub:
         self.opener = build_opener(AssetRedirects())
 
     def releases(self):
+        """Yield all visible releases, including authenticated drafts, across pages."""
         page = 1
         while True:
             batch = self.request(f'/releases?per_page=100&page={page}')
@@ -99,6 +103,7 @@ class GitHub:
             page += 1
 
     def find_release(self, tag):
+        """Resolve one draft or published release even when its tag is absent."""
         # The get-by-tag API is for published releases. Authenticated listing
         # also includes drafts whose tags may not exist yet.
         matches = [record for record in self.releases() if record['tag_name'] == tag]
@@ -107,9 +112,11 @@ class GitHub:
         return matches[0]
 
     def already_published(self, sha):
+        """Prevent CI reruns from releasing an already published source commit."""
         return any(not record['draft'] and record['target_commitish'] == sha for record in self.releases())
 
     def request(self, path, method='GET', data=None, raw=False, content_type='application/json'):
+        """Send authenticated GitHub API requests or download raw asset bytes."""
         url = path if path.startswith('https://') else self.base + path
         if urlparse(url).netloc not in ('api.github.com', 'uploads.github.com'):
             raise ValueError('Unexpected GitHub API or upload host')
@@ -125,6 +132,7 @@ class GitHub:
 
 
 def publish_assets(api, release, files, sha, publish):
+    """Bind a draft to source, verify every remote asset, then optionally publish."""
     if not release['draft']:
         raise ValueError('Refusing to modify a published release')
     target = release['target_commitish']
@@ -169,6 +177,7 @@ def publish_assets(api, release, files, sha, publish):
 
 
 def main():
+    """Check source eligibility or build and publish the selected draft release."""
     sha = os.environ['SOURCE_SHA']
     actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     if actual != sha:
