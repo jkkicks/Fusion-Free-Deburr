@@ -17,19 +17,27 @@ SHA = 'a' * 40
 
 
 class FakeGitHub:
-    def __init__(self, corrupt_asset=None, tag_sha=SHA):
+    def __init__(self, corrupt_asset=None, tag_sha=SHA, annotated=False):
         self.calls = []
         self.corrupt_asset = corrupt_asset
         self.tag_sha = tag_sha
+        self.annotated = annotated
         self.payloads = {}
 
     def request(self, path, method='GET', data=None, **kwargs):
         """Keep each uploaded asset independent and optionally corrupt one download."""
         self.calls.append((path, method, data))
         if path.startswith('/commits/'):
+            # Real GitHub answers 422 here for unknown tag names; never use it.
+            raise HTTPError(path, 422, 'Unprocessable Entity', {}, None)
+        if path.startswith('/git/ref/tags/'):
             if self.tag_sha is None:
-                raise HTTPError(path, 404, 'Tag not created yet', {}, None)
-            return {'sha': self.tag_sha}
+                raise HTTPError(path, 404, 'Not Found', {}, None)
+            if self.annotated:
+                return {'object': {'type': 'tag', 'sha': 't' * 40}}
+            return {'object': {'type': 'commit', 'sha': self.tag_sha}}
+        if path.startswith('/git/tags/'):
+            return {'object': {'type': 'commit', 'sha': self.tag_sha}}
         if '/assets?' in path:
             return []
         if method == 'POST':
@@ -115,6 +123,38 @@ class ReleaseTests(unittest.TestCase):
             api = FakeGitHub(tag_sha=None)
             release.publish_assets(api, self.draft(), [path], SHA, True)
             self.assertEqual(api.calls[-1][2]['draft'], False)
+
+    def test_annotated_tags_resolve_to_their_commit(self):
+        """Annotated tags are accepted only when they peel to the source commit."""
+        for tag_sha, accepted in ((SHA, True), ('b' * 40, False)):
+            with self.subTest(tag_sha=tag_sha), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'payload.zip'
+                path.write_bytes(b'payload')
+                api = FakeGitHub(tag_sha=tag_sha, annotated=True)
+                if accepted:
+                    release.publish_assets(api, self.draft(), [path], SHA, True)
+                    self.assertEqual(api.calls[-1][2]['draft'], False)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'another commit'):
+                        release.publish_assets(api, self.draft(), [path], SHA, True)
+                    self.assertFalse(any(method != 'GET' for _, method, _ in api.calls))
+
+    def test_tag_lookup_only_treats_404_as_missing(self):
+        """Other API errors, including validation failures, must stop publication."""
+        class Failing:
+            def __init__(self, code):
+                self.code = code
+            def request(self, path, **kwargs):
+                raise HTTPError(path, self.code, 'error', {}, None)
+        self.assertIsNone(release.tag_commit(Failing(404), 'v1.0.0'))
+        for code in (401, 403, 422, 500):
+            with self.subTest(code=code), self.assertRaises(HTTPError):
+                release.tag_commit(Failing(code), 'v1.0.0')
+        class Blob:
+            def request(self, path, **kwargs):
+                return {'object': {'type': 'tree', 'sha': SHA}}
+        with self.assertRaisesRegex(ValueError, 'not a commit'):
+            release.tag_commit(Blob(), 'v1.0.0')
 
     def test_existing_draft_assets_must_match_on_retry(self):
         """A retry reuses matching assets and rejects changed bytes without upload."""

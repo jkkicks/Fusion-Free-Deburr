@@ -131,6 +131,27 @@ class GitHub:
             return body if raw else (json.loads(body) if body else None)
 
 
+def tag_commit(api, name):
+    """Return the commit a tag resolves to, or None when the tag does not exist.
+
+    Only the exact-ref endpoint's 404 means "missing"; GitHub answers 422 to
+    /commits/<unknown>, and any other error must stay visible.
+    """
+    try:
+        obj = api.request(f'/git/ref/tags/{quote(name, safe="")}')['object']
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        return None
+    for _ in range(10):  # annotated tags may nest; bound the walk
+        if obj['type'] == 'commit':
+            return obj['sha']
+        if obj['type'] != 'tag':
+            raise ValueError(f"Tag {name} points to a {obj['type']}, not a commit")
+        obj = api.request(f"/git/tags/{obj['sha']}")['object']
+    raise ValueError(f'Tag {name} has too many nested annotations')
+
+
 def publish_assets(api, release, files, sha, publish):
     """Bind a draft to source, verify every remote asset, then optionally publish."""
     if not release['draft']:
@@ -139,15 +160,9 @@ def publish_assets(api, release, files, sha, publish):
     if target != sha and re.fullmatch(r'[0-9a-f]{40}', target):
         raise ValueError('Draft already belongs to a different source commit')
     # A pre-existing tag must point to this exact source, including annotated tags.
-    tag = quote(release['tag_name'], safe='')
-    try:
-        commit = api.request(f'/commits/{tag}')
-    except HTTPError as error:
-        if error.code != 404:
-            raise
-    else:
-        if commit['sha'] != sha:
-            raise ValueError('Existing tag points to another commit')
+    existing = tag_commit(api, release['tag_name'])
+    if existing is not None and existing != sha:
+        raise ValueError('Existing tag points to another commit')
     rid = release['id']
     api.request(f'/releases/{rid}', 'PATCH', {'target_commitish': sha})
     assets = []
