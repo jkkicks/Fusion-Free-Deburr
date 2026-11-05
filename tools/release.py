@@ -152,6 +152,15 @@ def tag_commit(api, name):
     raise ValueError(f'Tag {name} has too many nested annotations')
 
 
+def verify_published(api, rid, name, sha):
+    """Fail loudly if the published release is not bound to its real tag and source."""
+    published = api.request(f'/releases/{rid}')
+    if published['draft'] or published['tag_name'] != name:
+        raise ValueError(f"Published release has tag {published['tag_name']!r}, expected {name!r}; repair it before use")
+    if tag_commit(api, name) != sha:
+        raise ValueError(f'Tag {name} does not point at the release source commit')
+
+
 def publish_assets(api, release, files, sha, publish):
     """Bind a draft to source, verify every remote asset, then optionally publish."""
     if not release['draft']:
@@ -164,7 +173,10 @@ def publish_assets(api, release, files, sha, publish):
     if existing is not None and existing != sha:
         raise ValueError('Existing tag points to another commit')
     rid = release['id']
-    api.request(f'/releases/{rid}', 'PATCH', {'target_commitish': sha})
+    name = release['tag_name']
+    # Retargeting a draft whose tag does not exist yet makes GitHub swap its
+    # tag_name for an "untagged-..." placeholder, so always resend the name.
+    api.request(f'/releases/{rid}', 'PATCH', {'tag_name': name, 'target_commitish': sha})
     assets = []
     page = 1
     while True:
@@ -188,7 +200,9 @@ def publish_assets(api, release, files, sha, publish):
         if received != data:
             raise ValueError(f'Uploaded asset mismatch: {path.name}; draft left unpublished')
     if publish:
-        api.request(f'/releases/{rid}', 'PATCH', {'draft': False, 'make_latest': 'false' if release['prerelease'] else 'true'})
+        api.request(f'/releases/{rid}', 'PATCH', {'tag_name': name, 'target_commitish': sha, 'draft': False,
+                                                  'make_latest': 'false' if release['prerelease'] else 'true'})
+        verify_published(api, rid, name, sha)
 
 
 def main():

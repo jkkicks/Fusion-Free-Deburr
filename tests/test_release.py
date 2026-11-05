@@ -17,16 +17,23 @@ SHA = 'a' * 40
 
 
 class FakeGitHub:
-    def __init__(self, corrupt_asset=None, tag_sha=SHA, annotated=False):
+    def __init__(self, corrupt_asset=None, tag_sha=SHA, annotated=False, publish_tag=None):
         self.calls = []
         self.corrupt_asset = corrupt_asset
         self.tag_sha = tag_sha
         self.annotated = annotated
+        self.publish_tag = publish_tag
+        self.published = False
         self.payloads = {}
 
     def request(self, path, method='GET', data=None, **kwargs):
         """Keep each uploaded asset independent and optionally corrupt one download."""
         self.calls.append((path, method, data))
+        if method == 'PATCH' and data.get('draft') is False:
+            self.published = True
+            self.tag_sha = self.tag_sha or SHA  # publishing creates the missing tag
+        if path == '/releases/1' and method == 'GET':
+            return {'draft': not self.published, 'tag_name': self.publish_tag or 'v0.2.0-alpha.1'}
         if path.startswith('/commits/'):
             # Real GitHub answers 422 here for unknown tag names; never use it.
             raise HTTPError(path, 422, 'Unprocessable Entity', {}, None)
@@ -122,7 +129,22 @@ class ReleaseTests(unittest.TestCase):
             path.write_bytes(b'payload')
             api = FakeGitHub(tag_sha=None)
             release.publish_assets(api, self.draft(), [path], SHA, True)
-            self.assertEqual(api.calls[-1][2]['draft'], False)
+            self.assertTrue(any(method == 'PATCH' and data.get('draft') is False for _, method, data in api.calls))
+
+    def test_publish_keeps_the_real_tag_name(self):
+        """Every PATCH resends tag_name, and a placeholder tag after publishing is fatal."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'payload.zip'
+            path.write_bytes(b'payload')
+            api = FakeGitHub(tag_sha=None)
+            release.publish_assets(api, self.draft(), [path], SHA, True)
+            patches = [data for _, method, data in api.calls if method == 'PATCH']
+            self.assertEqual(len(patches), 2)
+            for data in patches:
+                self.assertEqual((data['tag_name'], data['target_commitish']), ('v0.2.0-alpha.1', SHA))
+            api = FakeGitHub(tag_sha=None, publish_tag='untagged-abc123')
+            with self.assertRaisesRegex(ValueError, 'untagged-abc123'):
+                release.publish_assets(api, self.draft(), [path], SHA, True)
 
     def test_annotated_tags_resolve_to_their_commit(self):
         """Annotated tags are accepted only when they peel to the source commit."""
@@ -133,7 +155,7 @@ class ReleaseTests(unittest.TestCase):
                 api = FakeGitHub(tag_sha=tag_sha, annotated=True)
                 if accepted:
                     release.publish_assets(api, self.draft(), [path], SHA, True)
-                    self.assertEqual(api.calls[-1][2]['draft'], False)
+                    self.assertTrue(any(method == 'PATCH' and data.get('draft') is False for _, method, data in api.calls))
                 else:
                     with self.assertRaisesRegex(ValueError, 'another commit'):
                         release.publish_assets(api, self.draft(), [path], SHA, True)

@@ -9,6 +9,10 @@ The publisher stamps the packaged manifest without changing the source manifest,
 builds the canonical installation ZIP, and uploads `update.json` and `SHA256SUMS`.
 It downloads every uploaded asset and compares bytes before publishing the draft.
 Published releases cannot be overwritten by this workflow.
+GitHub replaces the `tag_name` of a draft with an `untagged-...` placeholder when
+it is retargeted before its tag exists, so every update resends the real tag name
+and, after publishing, the workflow fails unless the release carries that tag and
+the tag resolves to the source commit.
 
 Use exactly one category label (`feature`, `bug`, `documentation`, `maintenance`)
 and exactly one version label (`release:major`, `release:minor`, `release:patch`)
