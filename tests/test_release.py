@@ -87,6 +87,53 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 release.validate_version(version)
 
+    def test_semver_precedence(self):
+        """Ordering follows SemVer 2.0.0, so a stable outranks its own nightlies."""
+        spec = ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta',
+                '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0', '1.0.1', '1.10.0', '2.0.0']
+        ours = ['0.1.0-alpha', '0.1.0-alpha.3', '0.1.0-nightly.0', '0.1.0-nightly.10', '0.1.0',
+                '0.1.1-nightly.0', '0.2.0', '0.3.0-nightly.0']
+        for ordered in (spec, ours):
+            self.assertEqual(sorted(reversed(ordered), key=release.version_key), ordered)
+
+    def test_channels(self):
+        """Only versions without a prerelease part belong to the stable channel."""
+        self.assertEqual(release.channel_for('0.1.0'), 'stable')
+        self.assertEqual(release.channel_for('0.1.1-nightly.4'), 'nightly')
+
+    def test_new_release_must_outrank_every_published_release(self):
+        """A stable may follow its nightlies, but nothing may go out at or below a published version."""
+        published = ['v0.1.0-alpha', 'v0.1.0-alpha.3', 'v0.1.0-nightly.2', 'untagged-123', 'v1.0']
+        for version in ('0.1.0-nightly.3', '0.1.0', '1.0.0'):
+            release.require_newer(version, published)
+        for version in ('0.1.0-nightly.2', '0.1.0-nightly.1', '0.1.0-alpha.4'):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'not newer'):
+                release.require_newer(version, published)
+
+    def test_stable_only_publication_lookup(self):
+        """A nightly at a commit does not block cutting a stable from that same commit."""
+        api = release.GitHub('test/test', 'unused')
+        nightly = {'draft': False, 'prerelease': True, 'tag_name': 'v0.1.0-nightly.0', 'target_commitish': SHA}
+        with patch.object(api, 'releases', side_effect=lambda: iter([nightly])):
+            self.assertTrue(api.already_published(SHA))
+            self.assertFalse(api.already_published(SHA, stable_only=True))
+        with patch.object(api, 'releases', side_effect=lambda: iter([dict(nightly, prerelease=False)])):
+            self.assertTrue(api.already_published(SHA, stable_only=True))
+
+    def test_drafter_configs_share_notes_and_version_rules(self):
+        """Nightly and stable drafts must categorize PRs and resolve labels the same way."""
+        github = Path(__file__).resolve().parents[1] / '.github'
+        nightly = (github / 'release-drafter.yml').read_text(encoding='utf-8')
+        stable = (github / 'release-drafter-stable.yml').read_text(encoding='utf-8')
+        self.assertEqual(nightly.split('\ncategories:', 1)[1], stable.split('\ncategories:', 1)[1])
+        keys = lambda text: {line.split(':', 1)[0]: line.split(':', 1)[1].strip()
+                             for line in text.splitlines() if line and not line[0] in '# '}
+        self.assertEqual(keys(nightly)['prerelease-identifier'], 'nightly')
+        # Any prerelease-identifier makes Release Drafter count nightlies as the
+        # previous release, which would cut stable notes down to one night.
+        self.assertNotIn('prerelease-identifier', keys(stable))
+        self.assertEqual((keys(stable)['include-pre-releases'], keys(stable)['prerelease']), ('false', 'false'))
+
     def draft(self):
         return {'draft': True, 'id': 1, 'target_commitish': SHA,
                 'tag_name': 'v0.2.0-alpha.1', 'prerelease': True,
@@ -234,7 +281,7 @@ class ReleaseTests(unittest.TestCase):
         metadata = json.loads(files[1].read_bytes())
         self.assertEqual(metadata['asset']['sha256'], release.digest(first))
         self.assertEqual(metadata['asset']['size'], len(first))
-        self.assertEqual(metadata['channel'], 'preview')
+        self.assertEqual(metadata['channel'], 'nightly')
         self.assertEqual(files[2].read_text(encoding='utf-8').splitlines(), [
             f'{release.digest(first)}  {files[0].name}',
             f'{release.digest(files[1].read_bytes())}  {files[1].name}',
