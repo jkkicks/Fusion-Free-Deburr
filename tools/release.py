@@ -24,6 +24,31 @@ def validate_version(version):
     return version
 
 
+def version_key(version):
+    """Sort key giving SemVer 2.0.0 precedence, so updaters and releases agree on "newer"."""
+    major, minor, patch, pre = SEMVER.fullmatch(validate_version(version)).groups()
+    # A release outranks its prereleases. Numeric identifiers sort numerically
+    # and below alphanumeric ones; a longer identifier list wins a shared prefix.
+    identifiers = tuple((0, int(p), '') if p.isdigit() else (1, 0, p) for p in pre.split('.')) if pre else ()
+    return int(major), int(minor), int(patch), not pre, identifiers
+
+
+def channel_for(version):
+    """Stable versions have no prerelease part; every prerelease is a nightly build."""
+    return 'nightly' if SEMVER.fullmatch(validate_version(version))[4] else 'stable'
+
+
+def require_newer(version, published_tags):
+    """Every release must outrank all earlier ones, or updaters could miss it."""
+    for tag in published_tags:
+        try:
+            older = version_key(tag.removeprefix('v'))
+        except ValueError:
+            continue  # tags that are not v-prefixed SemVer are not update candidates
+        if version_key(version) <= older:
+            raise ValueError(f'v{version} is not newer than published {tag}; choose a higher version')
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -59,7 +84,7 @@ def build_assets(root, version, source_sha, repository):
     release_url = f'https://github.com/{repository}/releases/tag/v{version}'
     metadata = {
         'schema_version': 1, 'version': version,
-        'channel': 'preview' if '-' in version else 'stable',
+        'channel': channel_for(version),
         'source_sha': source_sha, 'addin_id': manifest['id'],
         'supported_os': ['windows'],
         # No loader exists in legacy installations. They must install manually once.
@@ -111,9 +136,10 @@ class GitHub:
             raise ValueError(f'Expected exactly one release/draft for {tag}, found {len(matches)}')
         return matches[0]
 
-    def already_published(self, sha):
-        """Prevent CI reruns from releasing an already published source commit."""
-        return any(not record['draft'] and record['target_commitish'] == sha for record in self.releases())
+    def already_published(self, sha, stable_only=False):
+        """Detect a source commit that already has a published (optionally stable) release."""
+        return any(not record['draft'] and record['target_commitish'] == sha
+                   and not (stable_only and record['prerelease']) for record in self.releases())
 
     def request(self, path, method='GET', data=None, raw=False, content_type='application/json'):
         """Send authenticated GitHub API requests or download raw asset bytes."""
@@ -214,10 +240,17 @@ def main():
     repository = os.environ['GITHUB_REPOSITORY']
     api = GitHub(repository, os.environ['GH_TOKEN'])
     if sys.argv[1:] == ['--check-source']:
-        proceed = not api.already_published(sha)
+        # Nightly: nothing new since the last build of any kind, so skip quietly.
+        # Stable: someone asked for it, so a commit that is already stable fails.
+        if os.environ.get('RELEASE_CHANNEL') == 'stable':
+            if api.already_published(sha, stable_only=True):
+                raise ValueError('This commit is already a stable release')
+            proceed = True
+        else:
+            proceed = not api.already_published(sha)
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
             output.write(f'proceed={str(proceed).lower()}\n')
-        print('Source is eligible for drafting' if proceed else 'Source is already published; skipping')
+        print('Source is eligible for release' if proceed else 'Source is already published; skipping')
         return
     version = validate_version(os.environ['RELEASE_VERSION'].removeprefix('v'))
     # Require drafted notes; this script never invents a release or version.
@@ -226,6 +259,7 @@ def main():
         raise ValueError('Draft prerelease flag disagrees with version')
     if not release['draft']:
         raise ValueError('Version is already published; choose a new version')
+    require_newer(version, [r['tag_name'] for r in api.releases() if not r['draft']])
     files = build_assets(ROOT, version, sha, repository)
     publish_assets(api, release, files, sha, os.environ.get('PUBLISH_RELEASE') == 'true')
 

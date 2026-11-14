@@ -39,7 +39,7 @@ such as flat endmills, are rejected.
 | --- | --- |
 | Unit tests (run outside Fusion with mocks) | `tests/` |
 | CI on Windows and Linux; label check on pull requests | `.github/workflows/ci.yml` |
-| Automatic release notes and verified alpha releases on merge to `main` | `.github/workflows/release-drafter.yml`, `release.yml`, `tools/release.py`, [releases.md](releases.md) |
+| Release notes drafted on every merge, nightly prereleases, and approval-gated stable releases | `.github/workflows/release-drafter.yml`, `release.yml`, `tools/release.py`, [releases.md](releases.md) |
 | Installation ZIP | `tools/package.py` |
 | Diagnostic post processor that exports Trace moves as CSV (not machine code) | `tools/dump_toolpath.cps` |
 

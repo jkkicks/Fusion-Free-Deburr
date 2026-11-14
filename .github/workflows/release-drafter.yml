@@ -1,4 +1,6 @@
 name: Release notes
+# Keeps the nightly and stable draft releases up to date after each green main
+# CI run. It never publishes; see release.yml and docs/releases.md.
 on:
   workflow_run:
     workflows: [CI]
@@ -15,47 +17,31 @@ jobs:
   draft:
     if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Reject superseded CI results
         if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           test "$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')" = "$SOURCE_SHA"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Update the nightly draft
+        uses: release-drafter/release-drafter@7cf306f56b79636bb76931494ccf29fc893763bd # v6.1.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
-      - name: Skip commits already published
-        id: candidate
-        run: python tools/release.py --check-source
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-      - uses: release-drafter/release-drafter@7cf306f56b79636bb76931494ccf29fc893763bd # v6.1.0
-        if: steps.candidate.outputs.proceed == 'true'
-        id: draft
-        with:
+          config-name: release-drafter.yml
           publish: false
           disable-autolabeler: true
-          commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
+          commitish: ${{ env.SOURCE_SHA }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: steps.candidate.outputs.proceed == 'true'
+      - name: Update the stable draft
+        uses: release-drafter/release-drafter@7cf306f56b79636bb76931494ccf29fc893763bd # v6.1.0
         with:
-          python-version: '3.11'
-      - run: python -m pip install -r tools/requirements-build.txt
-        if: steps.candidate.outputs.proceed == 'true'
-      - run: python tools/make_icons.py
-        if: steps.candidate.outputs.proceed == 'true'
-      - name: Build, verify, and publish
-        if: github.event_name == 'workflow_run' && steps.candidate.outputs.proceed == 'true'
-        run: python tools/release.py
+          config-name: release-drafter-stable.yml
+          publish: false
+          disable-autolabeler: true
+          commitish: ${{ env.SOURCE_SHA }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_VERSION: ${{ steps.draft.outputs.tag_name }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-          PUBLISH_RELEASE: 'true'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

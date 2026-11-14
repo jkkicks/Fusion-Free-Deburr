@@ -2,11 +2,11 @@
 
 # Fusion Free Deburr
 
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha-blue)](https://github.com/jkkicks/Fusion-Free-Deburr/releases) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
+[![Version](https://img.shields.io/github/v/release/jkkicks/Fusion-Free-Deburr?label=version)](https://github.com/jkkicks/Fusion-Free-Deburr/releases/latest) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
 **Free 3-axis deburring toolpaths for Autodesk Fusion, using ball and lollipop end mills.**
 
-[Download the latest release](https://github.com/jkkicks/Fusion-Free-Deburr/releases)
+[Download the latest release](https://github.com/jkkicks/Fusion-Free-Deburr/releases/latest)
 
 </div>
 
@@ -28,9 +28,11 @@
 
 ## Install
 
-1. Download the ZIP from the [latest release](https://github.com/jkkicks/Fusion-Free-Deburr/releases) and extract it.
+1. Download the ZIP from the [latest release](https://github.com/jkkicks/Fusion-Free-Deburr/releases/latest) and extract it.
 2. In Fusion, press **Shift+S** to open **Scripts and Add-Ins**, or find it under **Utilities > Add-Ins**.
 3. Click **+** beside **My Add-Ins**, select the extracted `FusionFreeDeburr` folder, and run the add-in.
+
+Nightly builds of the latest changes are on the [Releases page](https://github.com/jkkicks/Fusion-Free-Deburr/releases), marked **Pre-release**. They are for testing; use the latest release for real work.
 
 ## Use
 
