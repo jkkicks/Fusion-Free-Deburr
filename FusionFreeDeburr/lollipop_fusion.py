@@ -18,6 +18,7 @@ from . import deburr_fusion as df
 CLEARANCE_STEP = .01  # cm, 0.1 mm maximum motion spacing
 CLEARANCE_MARGIN = .001  # cm, 0.01 mm
 CUT_SAMPLE_TOL = df.PATH_TOL  # cm, stroke tolerance when sampling a cone's cut region
+CUT_MESH_SIDE = .25  # longest mesh side over the cut region's faces, as a fraction of the width
 
 
 def _same_body_placement(body, candidate):
@@ -144,8 +145,11 @@ class Clearance:
                 return 'ball exceeds edge-break depth or touches fixture'
         return None
 
-    def _near_edges(self, point, limit):
-        """True if `point` is within `limit` of a selected edge."""
+    def _edge_distance(self, point, limit):
+        """Distance from `point` to a selected edge within `limit` of it, else None.
+
+        The edge need not be the nearest one, so the distance is an upper
+        bound on the distance to the selected edges."""
         if self._edge_boxes is None:
             self._edge_boxes = [_box(edge) for edge in self.edges]
         p = adsk.core.Point3D.create(*point)
@@ -155,10 +159,54 @@ class Clearance:
             lo, hi = self._edge_boxes[i]
             if any(point[k] < lo[k] - limit or point[k] > hi[k] + limit for k in range(3)):
                 continue
-            if self.measure.measureMinimumDistance(p, self.edges[i]).value <= limit:
+            distance = self.measure.measureMinimumDistance(p, self.edges[i]).value
+            if distance <= limit:
                 self._last_edge = i
-                return True
-        return False
+                return distance
+        return None
+
+    def _all_near_edges(self, samples, limit):
+        """True if every sample is within `limit` of a selected edge.
+
+        Distance to an edge changes no faster than position, so a sample x is
+        within limit of the edge found for a measured point m whenever
+        |x - m| + distance(m) <= limit. Such samples need no measurement."""
+        measured, last = [], None
+        for point in samples:
+            if last is not None and dc.dist(point, last[0]) + last[1] <= limit:
+                continue
+            last = next((m for m in measured if dc.dist(point, m[0]) + m[1] <= limit), None)
+            if last is not None:
+                continue
+            distance = self._edge_distance(point, limit)
+            if distance is None:
+                return False
+            last = (point, distance)
+            measured.append(last)
+        return True
+
+    def _cut_samples(self, cut):
+        """Points on the removed region: its vertices, edge strokes, and the
+        nodes of a mesh over its faces, so face interiors are covered too."""
+        samples = [df._tup(v.geometry) for v in cut.vertices]
+        for edge in cut.edges:
+            ev = edge.evaluator
+            ok, t0, t1 = ev.getParameterExtents()
+            ok, points = ev.getStrokes(t0, t1, CUT_SAMPLE_TOL) if ok else (False, [])
+            if not ok:
+                raise dm.DeburrError('could not check chamfer cutter clearance')
+            samples.extend(df._tup(p) for p in points)
+        calculator = cut.meshManager.createMeshCalculator()
+        mesh = None
+        if calculator:
+            calculator.surfaceTolerance = CUT_SAMPLE_TOL
+            calculator.maxSideLength = max(self.width * CUT_MESH_SIDE, CUT_SAMPLE_TOL)
+            mesh = calculator.calculate()
+        coords = list(mesh.nodeCoordinatesAsDouble) if mesh else []
+        if not coords or len(coords) % 3:
+            raise dm.DeburrError('could not mesh the chamfer cut region for its clearance check')
+        samples.extend(tuple(coords[i:i + 3]) for i in range(0, len(coords), 3))
+        return samples
 
     def _cone(self, tip, margin):
         """Every cutting flank may remove material only within the edge break
@@ -188,19 +236,12 @@ class Clearance:
                     continue
                 if body in self.fixtures:
                     return 'cutter touches fixture'
-                # Assumption: the removed region's farthest points from the
-                # selected edges lie on its boundary curves. That holds for a
-                # cone meeting planar faces near one straight edge (a convex
-                # region); at curved faces and near corners it is approximate.
-                samples = [df._tup(v.geometry) for v in cone.vertices]
-                for edge in cone.edges:
-                    ev = edge.evaluator
-                    ok, t0, t1 = ev.getParameterExtents()
-                    ok, points = ev.getStrokes(t0, t1, CUT_SAMPLE_TOL) if ok else (False, [])
-                    if not ok:
-                        raise dm.DeburrError('could not check chamfer cutter clearance')
-                    samples.extend(df._tup(p) for p in points)
-                if any(not self._near_edges(p, limit) for p in samples):
+                # The removed region is sampled on its boundary curves and over
+                # its faces at mesh spacing; points between samples are not
+                # checked. Assumption: no point inside the solid is farther from
+                # the selected edges than its faces are. That fails only when
+                # selected edges surround such a point in every direction.
+                if not self._all_near_edges(self._cut_samples(cone), limit):
                     return 'cutter removes material away from the selected edges'
         return None
 

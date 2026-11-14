@@ -223,7 +223,8 @@ class ChamferCheckTests(unittest.TestCase):
     """Cone cutters reuse the checked path: gouge limits, flanks, back-side access."""
     CUTTER = NS(radius=.6, noncutting_sections=(), frustums=((0, .3, .3, .6),))
 
-    def cone_check(self, vertices, near, fixture=False):
+    def cone_check(self, vertices, near, fixture=False, nodes=None):
+        """`near(p, limit)` gives the distance from p to the selected edge, or None."""
         body = NS()
         check = lf.Clearance(self.CUTTER, (0, 0, 1), [] if fixture else [body],
                              [body] if fixture else [], .05, edges=['edge'])
@@ -232,25 +233,64 @@ class ChamferCheckTests(unittest.TestCase):
         cut.faces.count = 1
         cut.vertices = [NS(geometry=NS(x=x, y=y, z=z)) for x, y, z in vertices]
         cut.edges = []
-        check._near_edges = MagicMock(side_effect=lambda p, limit: near(p, limit))
+        mesh = cut.meshManager.createMeshCalculator.return_value.calculate.return_value
+        mesh.nodeCoordinatesAsDouble = [c for p in (vertices if nodes is None else nodes) for c in p]
+        check._edge_distance = MagicMock(side_effect=lambda p, limit: near(p, limit))
         with patch.object(lf, '_overlap', return_value=True), \
                 patch.object(adsk.core.Point3D, 'create', side_effect=lambda *p: p):
             return check.point((0, 0, 0), .001), check
 
+    @staticmethod
+    def along_x(p, limit):
+        # Distance to a selected edge along the y axis.
+        return abs(p[0]) if abs(p[0]) <= limit else None
+
     def test_cone_cut_must_stay_near_selected_edges(self):
-        near = lambda p, limit: abs(p[0]) <= limit
-        result, check = self.cone_check([(.04, 0, 0), (-.03, 0, 0)], near)
+        result, check = self.cone_check([(.04, 0, 0), (-.03, 0, 0)], self.along_x)
         self.assertIsNone(result)
         # The allowance covers the break width plus the inflated motion envelope.
-        limit = check._near_edges.call_args.args[1]
+        limit = check._edge_distance.call_args.args[1]
         self.assertGreater(limit, .05)
         self.assertLess(limit, .05 + .003)
-        result, _ = self.cone_check([(.04, 0, 0), (.3, 0, 0)], near)
+        result, _ = self.cone_check([(.04, 0, 0), (.3, 0, 0)], self.along_x)
         self.assertIn('away from the selected edges', result)
 
     def test_cone_may_not_touch_fixtures(self):
-        result, _ = self.cone_check([(0, 0, 0)], lambda p, limit: True, fixture=True)
+        result, _ = self.cone_check([(0, 0, 0)], lambda p, limit: 0, fixture=True)
         self.assertIn('touches fixture', result)
+
+    def test_cut_face_interior_far_from_edges_is_rejected(self):
+        # A thin plate inside the cutter: every boundary point lies near the
+        # selected rim, but the middle of its face does not.
+        rim = [(.04, 0, 0), (-.04, 0, 0), (.04, .5, 0), (-.04, .5, 0)]
+        inside = rim + [(.3, .25, 0)]
+        result, _ = self.cone_check(rim, self.along_x, nodes=inside)
+        self.assertIn('away from the selected edges', result)
+        result, _ = self.cone_check(rim, self.along_x, nodes=rim)
+        self.assertIsNone(result)
+
+    def test_cut_region_mesh_follows_width_and_failure_rejects(self):
+        _, check = self.cone_check([(0, 0, 0)], self.along_x)
+        cut = check.temp.createCylinderOrCone.return_value
+        calculator = cut.meshManager.createMeshCalculator.return_value
+        self.assertAlmostEqual(calculator.maxSideLength, .05 * lf.CUT_MESH_SIDE)
+        self.assertEqual(calculator.surfaceTolerance, lf.CUT_SAMPLE_TOL)
+        for nodes in ([], [(0, 0)]):
+            with self.subTest(nodes=nodes), \
+                    self.assertRaisesRegex(dm.DeburrError, 'could not mesh'):
+                self.cone_check([(0, 0, 0)], self.along_x, nodes=nodes)
+
+    def test_samples_near_a_measured_point_skip_measurement(self):
+        check = lf.Clearance(self.CUTTER, (0, 0, 1), [], [], .05, edges=['edge'])
+        check._edge_distance = MagicMock(side_effect=self.along_x)
+        limit = .05
+        # (0.01, 0) measures 0.01, which vouches for points within 0.04 of it.
+        samples = [(.01, 0, 0), (.01, .03, 0), (.04, 0, 0), (.01, .045, 0)]
+        self.assertTrue(check._all_near_edges(samples, limit))
+        self.assertEqual([c.args[0] for c in check._edge_distance.call_args_list],
+                         [(.01, 0, 0), (.01, .045, 0)])
+        check._edge_distance.reset_mock()
+        self.assertFalse(check._all_near_edges([(.01, 0, 0), (.06, 0, 0)], limit))
 
     def test_edges_use_first_flank_that_can_cut_them(self):
         top = NS(name='topside', radius=.6, frustums=(), noncutting_sections=())
@@ -339,6 +379,8 @@ class ChamferWiringTests(unittest.TestCase):
             cut_edge = NS(evaluator=NS(getParameterExtents=lambda: (True, 0, 1),
                                        getStrokes=lambda t0, t1, tol, s=stroke: (True, s)))
             cut = MagicMock(); cut.faces.count = 1; cut.vertices = []; cut.edges = [cut_edge]
+            mesh = cut.meshManager.createMeshCalculator.return_value.calculate.return_value
+            mesh.nodeCoordinatesAsDouble = [0, 0, 0]
             check = lf.Clearance(NS(radius=.6, noncutting_sections=(), frustums=((0, .3, .3, .6),)),
                                  (0, 0, 1), [NS()], [], .05, edges=[far, edge])
             check.measure = measure

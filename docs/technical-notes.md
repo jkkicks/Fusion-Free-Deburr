@@ -77,12 +77,18 @@ Chamfer paths use the lollipop clearance and access checks. At each sampled
 position, every cutting flank, enlarged for motion between samples, is
 intersected with the setup models. The enlargement offsets the slanted surface
 by the motion margin and extends it along the same slope, so it covers every
-point within that margin. All vertices and edge samples (0.01 mm chord
-tolerance) of the removed region must lie within the edge-break width, plus that
-enlargement and the 0.01 mm path tolerance, of a selected edge. This assumes the
-farthest removed points lie on the region's boundary curves, which holds for a
-cone meeting planar faces near one straight edge; at curved faces and corners it
-is approximate. Flanks may not touch fixtures. If no lateral or upward exit is
+point within that margin. The removed region is sampled at its vertices, along
+its edges (0.01 mm chord tolerance), and at the nodes of a mesh over its faces
+with sides no longer than a quarter of the edge-break width. Every sample must
+lie within the edge-break width, plus that enlargement and the 0.01 mm path
+tolerance, of a selected edge. Points between samples are not checked; with that
+mesh they are within 0.15 widths of a sample. Face sampling catches a thin
+feature whose edges all lie near selected edges but whose face does not, such as
+a shim inside the cutter. A sample needs no distance measurement when a measured
+point's distance plus the gap to it stays within the limit. The check assumes no
+point inside the removed solid is farther from the selected edges than its
+faces, which fails only if selected edges surround that point in every
+direction. Flanks may not touch fixtures. If no lateral or upward exit is
 clear, a back-side endpoint steps toward the tool axis, perpendicular to the
 edge in plan, until the cutter clears the face, then moves along the axis.
 Steps come from the nearest segment ends; where a closed contour starts at a
