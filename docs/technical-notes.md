@@ -79,10 +79,11 @@ intersected with the setup models. The enlargement offsets the slanted surface
 by the motion margin and extends it along the same slope, so it covers every
 point within that margin. The removed region is sampled at its vertices, along
 its edges (0.01 mm chord tolerance), and at the nodes of a mesh over its faces
-with sides no longer than a quarter of the edge-break width. Every sample must
-lie within the edge-break width, plus that enlargement and the 0.01 mm path
+with sides no longer than half the edge-break width. Every sample must lie
+within the edge-break width, plus that enlargement and the 0.01 mm path
 tolerance, of a selected edge. Points between samples are not checked; with that
-mesh they are within 0.15 widths of a sample. Face sampling catches a thin
+mesh they are within 0.29 widths of a sample, so no face point can exceed the
+limit by more than that. Face sampling catches a thin
 feature whose edges all lie near selected edges but whose face does not, such as
 a shim inside the cutter. A sample needs no distance measurement when a measured
 point's distance plus the gap to it stays within the limit. The check assumes no
@@ -118,6 +119,23 @@ through the hole. Clearance checking took about 8 to 80 s per operation on this
 plate, depending on Fusion's responsiveness. Caching Fusion bounding-box reads
 reduced one 288 s case to 8 s. These checks used the add-in modules from a
 Fusion script, not the dialog.
+
+Face-interior sampling verification (2026-11-14, Fusion 2706.1.17, macOS): the
+same plate and Harvey cutter were rebuilt in a new document, and the add-in
+modules ran from a Fusion script. Fusion meshed every temporary cut region.
+The topside, back-side, square-hole and mixed selections, the 3 inch cutter
+cases and the chamfer mill cases gave the same results as before. Their
+computed paths were identical to those from the boundary-only check. Run
+interleaved three times each, the top perimeter plus both hole rims took
+14.7 s instead of 7.4 s, with about twice as many distance measurements.
+Quarter-width mesh sides took about three times as long and were not used.
+Separate runs varied up to fivefold with Fusion's responsiveness. A 3 mm
+diameter, 0.3 mm thick shim was added as a second setup model, entirely inside
+the cutter at the middle of the outer top edge, and its top rim was selected.
+At that position the boundary-only check accepted the cut; face sampling
+rejected it. Along the whole edge both rejected it, because the cutter clips
+the shim partially on the way in. Trace operations were not regenerated for
+this change, since it only decides whether a path is accepted.
 
 Fusion derives a thread mill's shoulder (neck) diameter from its diameter and
 pitch on `Tool.createFromJson`. A tool whose pitch Fusion had normalized to 1 in

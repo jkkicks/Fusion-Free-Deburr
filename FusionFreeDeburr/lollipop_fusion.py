@@ -18,7 +18,7 @@ from . import deburr_fusion as df
 CLEARANCE_STEP = .01  # cm, 0.1 mm maximum motion spacing
 CLEARANCE_MARGIN = .001  # cm, 0.01 mm
 CUT_SAMPLE_TOL = df.PATH_TOL  # cm, stroke tolerance when sampling a cone's cut region
-CUT_MESH_SIDE = .25  # longest mesh side over the cut region's faces, as a fraction of the width
+CUT_MESH_SIDE = .5  # longest mesh side over the cut region's faces, as a fraction of the width
 
 
 def _same_body_placement(body, candidate):
@@ -171,11 +171,15 @@ class Clearance:
         Distance to an edge changes no faster than position, so a sample x is
         within limit of the edge found for a measured point m whenever
         |x - m| + distance(m) <= limit. Such samples need no measurement."""
+        # Visit samples cell by cell so neighbours follow each other and the
+        # last measured point, or a recent one, usually vouches for the next.
+        samples = sorted(samples, key=lambda p: tuple(math.floor(c / limit) for c in p))
         measured, last = [], None
         for point in samples:
-            if last is not None and dc.dist(point, last[0]) + last[1] <= limit:
+            if last is not None and math.dist(point, last[0]) + last[1] <= limit:
                 continue
-            last = next((m for m in measured if dc.dist(point, m[0]) + m[1] <= limit), None)
+            last = next((m for m in reversed(measured)
+                         if math.dist(point, m[0]) + m[1] <= limit), None)
             if last is not None:
                 continue
             distance = self._edge_distance(point, limit)
