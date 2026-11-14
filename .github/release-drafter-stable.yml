@@ -1,0 +1,30 @@
+# Stable track: notes and version since the previous stable release, ignoring
+# nightlies. Do not add prerelease-identifier here: Release Drafter would then
+# count nightlies as previous releases. Keep everything from `categories:` down
+# identical to release-drafter.yml (tests/test_release.py checks it).
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+tag-prefix: v
+version-template: '$MAJOR.$MINOR.$PATCH'
+include-pre-releases: false
+prerelease: false
+categories:
+  - title: Features
+    labels: [feature]
+  - title: Fixes
+    labels: [bug]
+  - title: Documentation
+    labels: [documentation]
+  - title: Maintenance
+    labels: [maintenance]
+version-resolver:
+  major:
+    labels: ['release:major']
+  minor:
+    labels: ['release:minor']
+  patch:
+    labels: ['release:patch']
+  default: patch
+change-template: '- $TITLE (#$NUMBER)'
+template: |
+  $CHANGES

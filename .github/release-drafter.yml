@@ -1,10 +1,13 @@
+# Nightly track: notes since the previous build of either kind.
+# release-drafter-stable.yml drafts the stable track. Keep everything from
+# `categories:` down identical in both files (tests/test_release.py checks it).
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 tag-prefix: v
 version-template: '$MAJOR.$MINOR.$PATCH$PRERELEASE'
 include-pre-releases: true
 prerelease: true
-prerelease-identifier: alpha
+prerelease-identifier: nightly
 categories:
   - title: Features
     labels: [feature]

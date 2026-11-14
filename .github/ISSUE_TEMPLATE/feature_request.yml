@@ -1,0 +1,32 @@
+name: Feature idea
+description: Suggest something new or a change to how it works
+labels: [enhancement]
+body:
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you start
+      options:
+        - label: I checked [docs/features.md](https://github.com/jkkicks/Fusion-Free-Deburr/blob/main/docs/features.md), open issues and open pull requests, and this isn't already there or in progress.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to machine?
+      description: The part, edge or situation, and what goes wrong or is missing today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+  - type: dropdown
+    id: help
+    attributes:
+      label: Would you like to work on it?
+      options:
+        - I'd like to make the change myself (with or without AI help)
+        - I can test it in Fusion
+        - Just suggesting it
