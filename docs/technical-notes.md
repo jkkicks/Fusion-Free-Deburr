@@ -1,7 +1,8 @@
 # Geometry, safety, and validation notes
 
-Ball endmills and spherical lollipop mills are supported, including when editing
-an existing operation. Both require a positive finite diameter. Lollipop profiles also
+Ball endmills, spherical lollipop mills, and conical chamfer cutters (chamfer
+mills and pointed single-profile thread mills) are supported, including when
+editing an existing operation. All require a positive finite diameter. Lollipop profiles also
 require valid sphere radius, neck, flute, shoulder, and shaft dimensions. Trace compensation is centered, controller compensation is disabled
 when exposed, and axial/radial offsets are zeroed. Missing required Trace settings stop the
 operation update rather than relying on user defaults.
@@ -40,6 +41,73 @@ Trace offsets are disabled; full retracts and selection order are preserved. The
 checks use the finished solid model and the tool assembly as defined in the library.
 They do not simulate remaining stock or unmodeled workholding. Repositioned manufacturing
 models and non-solid setup selections are rejected.
+
+Chamfer cutters are conical flanks of revolution. A `chamfer mill` has one
+flank from its tip diameter to its diameter at the taper angle (half the
+included angle). A pointed single-profile `thread mill` has two flanks: one
+tooth of the profile angle spanning the flute length from the tip, with the
+diameter at its point. Fusion renders a 90 degree thread mill this way. The
+tooth root must be positive, and a neck or shank on the tooth must not be wider
+than the root. Bodies above the flanks are noncutting cylinders.
+
+At each edge sample, the chamfer normal lies in the plane of the two face
+normals, and its component along the tool axis equals the sine of the flank's
+half-angle (negative for a back flank). Of the solutions at least 10 degrees
+from both faces, the one nearest the bisector is used. The plane depth keeps
+the larger leg equal to the edge-break width. The flank is placed tangent to
+that plane with the chamfer strip centered on it, leaving 5% of the flank clear
+at each end. This is exact for straight edges, because the swept cone's envelope
+is then that plane. Edges steeper than the flank are rejected. Each edge uses
+the first flank that can cut it, topside first. Edges cut by different flanks
+are never linked into one chain. Corner rolls use the flank model, without the
+vertex-crossing fallback, and are refined until chord midpoints are within
+0.005 mm of the roll. Otherwise a wide cutter's chords would cut inside the arc.
+
+Chamfer paths use the lollipop clearance and access checks. At each sampled
+position, every cutting flank, enlarged for motion between samples, is
+intersected with the setup models. All vertices and edge samples of the removed
+region must lie within the edge-break width, plus that enlargement and the 0.01 mm path
+tolerance, of a selected edge. Flanks may not touch fixtures. If no lateral or
+upward exit is clear, a back-side endpoint steps toward the tool axis until
+the cutter clears the face, then moves along the axis. Trace defaults
+`doChamfer` to true for chamfer mills; it is forced off, since the path already
+describes the tool tip.
+
+Chamfer verification (2026-11-13, Fusion 2706.1.17): on a scratch
+80 x 60 x 12 mm plate with a 30 mm through hole and a 20 x 20 x 5 mm pocket, a
+Harvey #875510 double-angle cutter (1/2 inch, 90 degrees, 1/4 inch width;
+dimensions from Harvey's DXF) was defined as a thread mill. The top outer
+perimeter, hole rim, and pocket rim generated three topside contours. The bottom
+perimeter and hole rim generated two back-side contours; the hole exit stepped
+2.54 mm toward the hole axis before rising through the hole. A mixed selection
+split into one contour per flank. Fusion generated valid Trace toolpaths. Posted
+feed moves were within 0.00006 mm of the computed paths. Computed vertices were
+within 0.0053 mm of the posted path, which Trace thins at its 0.01 mm tolerance.
+Cutter solids placed at posted positions removed exactly 0.5 mm on both faces at
+straight and curved, top and bottom edges. A 1/2 inch 90 degree chamfer mill
+matched its path the same way and rejected bottom edges. With Fusion's default
+`doChamfer` and a 0.5 mm chamfer width, Trace shifted that path by 0.5 mm, which
+the forced setting prevents. A 3 inch cutter was rejected at the 30 mm hole
+for cutting away from the edge. Before roll refinement, it was also rejected at
+outside corners for a 0.03 mm chord overcut. A 1.25 inch cutter could not exit
+through the hole. Clearance checking took about 8 to 80 s per operation on this
+plate, depending on Fusion's responsiveness. Caching Fusion bounding-box reads
+reduced one 288 s case to 8 s. These checks used the add-in modules from a
+Fusion script, not the dialog.
+
+Fusion derives a thread mill's shoulder (neck) diameter from its diameter and
+pitch on `Tool.createFromJson`. A tool whose pitch Fusion had normalized to 1 in
+re-imported with a -0.5 in neck and was drawn as a plain cylinder. Re-imported
+thread mills now get the neck from the source JSON, identical document tools
+without a GUID are reused instead of re-imported, and negative necks are
+rejected. Define such cutters with pitch equal to the cutter width.
+
+The manifest lists macOS as well as Windows. Fusion on macOS refuses to add an
+add-in whose manifest omits it. On macOS (2026-11-13) a `Backside` chamfer
+operation on the showcase's bottom outer perimeter was created through the
+dialog and generated without warnings, using a Harvey #875510 document tool with
+feed presets from Harvey's chart. Edit Deburr on chamfer operations and Windows
+have not been rechecked for chamfer cutters.
 
 Run regressions outside Fusion with `python -m unittest discover -s tests`.
 Fusion API tests use mocks; actual Trace generation and parameter compatibility must

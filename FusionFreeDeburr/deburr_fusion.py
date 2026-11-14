@@ -21,6 +21,8 @@ TRACE_EXPRESSIONS = (
     ('compensation', "'center'"), ('compensationType', "'off'"),
     ('axialOffset', '0 mm'), ('radialOffset', '0 mm'),
     ('doLeadIn', 'false'), ('doLeadOut', 'false'),
+    # Trace adds its own chamfer offset for chamfer mills unless disabled.
+    ('doChamfer', 'false'),
     ('preserveOrder', 'true'), ('orderByDepth', 'false'),
     ('smoothingFilter', 'false'), ('retractionPolicy', "'full'"),
     ('tolerance', '0.01 mm'))

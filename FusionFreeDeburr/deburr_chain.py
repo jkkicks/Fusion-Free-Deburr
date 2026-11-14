@@ -22,6 +22,8 @@ except ImportError:  # imported directly by the unit tests
 
 JOIN_TOL = 1e-4              # cm; endpoints closer than this are the same point
 ROLL_STEP_DEG = 5.0          # angular step when rolling around a convex corner
+ROLL_CHORD_TOL = 5e-4        # cm; cutter-model roll chords stay this close to the arc
+ROLL_MAX_STEPS = 4096
 CROSSING_SEARCH = 200        # segments searched back/forward for a crossing
 
 
@@ -170,13 +172,15 @@ def find_crossing(a, b, axis):
     return None
 
 
-def corner_roll(a_end: End, b_start: End, tool_axis, radius, width, max_contact_height=0.0):
+def corner_roll(a_end: End, b_start: End, tool_axis, radius, width, max_contact_height=0.0,
+                tip=None):
     """Tool-tip points rolling the ball around a convex vertex shared by two edges.
 
     The ball stays on the shared face while the other face's normal turns
     about the shared normal, on the side the corner points to. (Taking the
     shortest turn instead fails at a spike, where the two edges leave the
     vertex in the same direction: the shortest turn goes over the shared face.)
+    `tip(p, n1, n2)` overrides the ball tool-tip model (e.g. a chamfer flank).
     """
     shared = set(a_end.normals) & set(b_start.normals)
     if len(shared) != 1:
@@ -198,15 +202,28 @@ def corner_roll(a_end: End, b_start: End, tool_axis, radius, width, max_contact_
         if dm.dot(outward, outward) > 1e-12 and dm.dot(_rotate(h_a, n_shared, turn / 2), outward) < 0:
             turn -= math.copysign(2 * math.pi, turn)
 
-    steps = max(2, math.ceil(math.degrees(abs(turn)) / ROLL_STEP_DEG))
-    points = []
-    for k in range(steps + 1):
-        t = k / steps
+    def at(t):
         tilt = tilt_a + (tilt_b - tilt_a) * t
         h = _rotate(h_a, n_shared, turn * t)
         n_other = dm.add(dm.scale(n_shared, math.cos(tilt)), dm.scale(h, math.sin(tilt)))
-        points.append(dm.tool_tip(a_end.vertex, n_shared, n_other, tool_axis, radius, width,
-                                  max_contact_height))
+        if tip is not None:
+            return tip(a_end.vertex, n_shared, n_other)
+        return dm.tool_tip(a_end.vertex, n_shared, n_other, tool_axis, radius, width,
+                           max_contact_height)
+
+    steps = max(2, math.ceil(math.degrees(abs(turn)) / ROLL_STEP_DEG))
+    points = [at(k / steps) for k in range(steps + 1)]
+    # A large cutter rolls on a wide arc whose chords can cut inside it. Cutter
+    # models refine until every chord midpoint is on the arc within tolerance.
+    while tip is not None:
+        mids = [at((k + .5) / steps) for k in range(steps)]
+        if all(dist(m, dm.scale(dm.add(a, b), .5)) <= ROLL_CHORD_TOL
+               for m, a, b in zip(mids, points, points[1:])):
+            break
+        if steps >= ROLL_MAX_STEPS:
+            raise dm.DeburrError('corner roll tolerance could not be reached')
+        points = [p for pair in zip(points, mids) for p in pair] + points[-1:]
+        steps *= 2
     return points
 
 
@@ -258,9 +275,10 @@ def _corner(k, a_end, b_start, a_tip, b_tip, tool_axis, radius, width, depth, no
     makers = ((lambda: corner_roll(a_end, b_start, tool_axis, radius, width)),
               (lambda: vertex_crossing(a_tip, b_tip, a_end.vertex, tool_axis, radius)))
     if cutter is not None:
-        # The vertex crossing does not model the finite upper cutting cap.
-        makers = (lambda: corner_roll(a_end, b_start, tool_axis, radius, width,
-                                      cutter.max_contact_height),)
+        # The vertex crossing models neither a lollipop's finite cutting cap
+        # nor a conical flank; roll with the cutter's own contact model.
+        tip = lambda p, n1, n2: cutter.tip(p, n1, n2, tool_axis, width)
+        makers = (lambda: corner_roll(a_end, b_start, tool_axis, radius, width, tip=tip),)
     for make in makers:
         try:
             points = make()

@@ -153,7 +153,7 @@ class LollipopTests(unittest.TestCase):
                                              maxPoint=NS(x=1, y=1, z=1)))],
                    fixtures=[], cutter=NS(radius=.4, noncutting_sections=()),
                    path=MagicMock(return_value='shaft collision'))
-        with self.assertRaisesRegex(dm.DeburrError, 'no clear lollipop approach'):
+        with self.assertRaisesRegex(dm.DeburrError, 'no clear approach'):
             lf.add_access([(0, 0, 0), (1, 0, 0)], [(0, -1, 0)], check)
 
     def test_clearance_samples_between_endpoints(self):
@@ -215,3 +215,73 @@ class LollipopTests(unittest.TestCase):
         check.measure = MagicMock()
         check.measure.measureMinimumDistance.return_value.value = .4005
         self.assertIn('touches fixture', check.point((0, 0, 0), .001))
+
+
+class ChamferCheckTests(unittest.TestCase):
+    """Cone cutters reuse the checked path: gouge limits, flanks, back-side access."""
+    CUTTER = NS(radius=.6, noncutting_sections=(), frustums=((0, .3, .3, .6),))
+
+    def cone_check(self, vertices, near, fixture=False):
+        body = NS()
+        check = lf.Clearance(self.CUTTER, (0, 0, 1), [] if fixture else [body],
+                             [body] if fixture else [], .05, edges=['edge'])
+        check.temp = MagicMock()
+        cut = check.temp.createCylinderOrCone.return_value
+        cut.faces.count = 1
+        cut.vertices = [NS(geometry=NS(x=x, y=y, z=z)) for x, y, z in vertices]
+        cut.edges = []
+        check._near_edges = MagicMock(side_effect=lambda p, limit: near(p, limit))
+        with patch.object(lf, '_overlap', return_value=True), \
+                patch.object(adsk.core.Point3D, 'create', side_effect=lambda *p: p):
+            return check.point((0, 0, 0), .001), check
+
+    def test_cone_cut_must_stay_near_selected_edges(self):
+        near = lambda p, limit: abs(p[0]) <= limit
+        result, check = self.cone_check([(.04, 0, 0), (-.03, 0, 0)], near)
+        self.assertIsNone(result)
+        # The allowance covers the break width plus the inflated motion envelope.
+        limit = check._near_edges.call_args.args[1]
+        self.assertGreater(limit, .05)
+        self.assertLess(limit, .05 + .003)
+        result, _ = self.cone_check([(.04, 0, 0), (.3, 0, 0)], near)
+        self.assertIn('away from the selected edges', result)
+
+    def test_cone_may_not_touch_fixtures(self):
+        result, _ = self.cone_check([(0, 0, 0)], lambda p, limit: True, fixture=True)
+        self.assertIn('touches fixture', result)
+
+    def test_edges_use_first_flank_that_can_cut_them(self):
+        top = NS(name='topside', radius=.6, frustums=(), noncutting_sections=())
+        back = NS(name='back side', radius=.6, frustums=(), noncutting_sections=())
+        tool = NS(radius=.6, noncutting_sections=(), variants=lambda: (top, back))
+
+        def segment(edge, radius, width, axis, ids, variant):
+            if edge.flank != variant.name:
+                raise dm.DeburrError('cutter flank cannot reach this edge')
+            return variant.name
+        edges = [NS(flank='topside'), NS(flank='back side')]
+        with patch.object(lf, 'setup_edges', side_effect=lambda e, b: e), \
+                patch.object(lf, 'Clearance'), patch.object(lf, '_directions', return_value=[]), \
+                patch.object(lf.df, 'edge_segment', side_effect=segment), \
+                patch.object(lf.dc, 'order_chains', return_value=[]) as order:
+            lf.build_chains(edges, tool, .05, (0, 0, 1), [])
+            self.assertEqual([c.args[0] for c in order.call_args_list],
+                             [['topside'], ['back side']])
+            edges.append(NS(flank='neither'))
+            with self.assertRaisesRegex(dm.DeburrError, 'edge 3 cannot be cut.*back side'):
+                lf.build_chains(edges, tool, .05, (0, 0, 1), [])
+
+    def test_back_side_cut_steps_toward_axis_before_rising(self):
+        box = NS(minPoint=NS(x=-1, y=-1, z=0), maxPoint=NS(x=1, y=1, z=1))
+        start, end = (0, 0, .2), (.1, 0, .2)
+        lateral_or_vertical = lambda pts: 'gouge' if len(pts) == 2 else None
+        check = NS(bodies=[NS(boundingBox=box)], fixtures=[], axis=(0, 0, 1),
+                   cutter=NS(radius=.6, noncutting_sections=()),
+                   path=MagicMock(side_effect=lateral_or_vertical))
+        retreats = {start: ((1, 0, 0), .3), end: ((-1, 0, 0), .2)}
+        result = lf.add_access([start, end], [(0, -1, 0), (0, 0, 1)], check, retreats)
+        self.assertEqual(result[2:4], [start, end])
+        self.assertEqual(result[1], (.3, 0, .2))
+        self.assertEqual(result[4], (-.1, 0, .2))
+        self.assertGreater(result[0][2], 1)
+        self.assertGreater(result[5][2], result[0][2])

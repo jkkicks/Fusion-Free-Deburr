@@ -20,7 +20,7 @@ for _module in (deburr_math, deburr_chain, deburr_fusion, cutter_profile, lollip
 
 CMD_ID = 'additionalToolpaths_ballDeburr'
 CMD_NAME = 'Deburr'
-CMD_TOOLTIP = ('Generate edge-break geometry and a trace toolpath for a ball or lollipop endmill.\n'
+CMD_TOOLTIP = ('Generate edge-break geometry and a trace toolpath for a ball, lollipop, or chamfer cutter.\n'
                'Select an existing Deburr operation first to edit it.')
 # Right-click menu entry on Deburr operations; runs the same command,
 # which opens in edit mode for the selected operation.
