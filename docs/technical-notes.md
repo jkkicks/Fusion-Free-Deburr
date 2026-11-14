@@ -81,9 +81,12 @@ point within that margin. The removed region is sampled at its vertices, along
 its edges (0.01 mm chord tolerance), and at the nodes of a mesh over its faces
 with sides no longer than half the edge-break width. Every sample must lie
 within the edge-break width, plus that enlargement and the 0.01 mm path
-tolerance, of a selected edge. Points between samples are not checked; with that
-mesh they are within 0.29 widths of a sample, so no face point can exceed the
-limit by more than that. Face sampling catches a thin
+tolerance, of a selected edge. Points between samples are not checked. For
+edge breaks of at least 0.02 mm (below that, the 0.01 mm minimum mesh side
+applies), a point on a mesh triangle is within 0.29 widths of a sample. A point
+on a curved face is further off by the mesh's distance from the face, which
+Fusion is asked to keep within 0.01 mm but does not guarantee. So a face point
+can exceed the limit by about 0.29 widths plus that mesh deviation. Face sampling catches a thin
 feature whose edges all lie near selected edges but whose face does not, such as
 a shim inside the cutter. A sample needs no distance measurement when a measured
 point's distance plus the gap to it stays within the limit. The check assumes no
