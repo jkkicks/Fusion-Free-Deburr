@@ -235,6 +235,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(metadata['asset']['sha256'], release.digest(first))
         self.assertEqual(metadata['asset']['size'], len(first))
         self.assertEqual(metadata['channel'], 'preview')
+        declared = json.loads(manifest.read_text(encoding='utf-8'))['supportedOS'].split('|')
+        self.assertEqual(metadata['supported_os'], declared)
         self.assertEqual(files[2].read_text(encoding='utf-8').splitlines(), [
             f'{release.digest(first)}  {files[0].name}',
             f'{release.digest(files[1].read_bytes())}  {files[1].name}',

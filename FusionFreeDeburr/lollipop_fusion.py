@@ -17,7 +17,7 @@ from . import deburr_fusion as df
 
 CLEARANCE_STEP = .01  # cm, 0.1 mm maximum motion spacing
 CLEARANCE_MARGIN = .001  # cm, 0.01 mm
-CUT_SAMPLE_TOL = .005  # cm, stroke tolerance when sampling a cone's cut region
+CUT_SAMPLE_TOL = df.PATH_TOL  # cm, stroke tolerance when sampling a cone's cut region
 
 
 def _same_body_placement(body, candidate):
@@ -165,17 +165,22 @@ class Clearance:
         of a selected edge, and must not touch fixtures at all."""
         obstacles = self.bodies + self.fixtures
         for z0, r0, z1, r1 in self.cutter.frustums:
-            # Radial growth that offsets the slanted surface by at least margin.
-            grow = margin * math.hypot(1, (r1 - r0) / (z1 - z0))
+            # Cover every point within `margin` of the flank: offset the slanted
+            # surface by margin (radial growth margin * sqrt(1 + slope^2)) and
+            # extend it by margin at both ends along the same slope. The ends
+            # stay tangent to the rounded rims, so no rim falls outside.
+            slope = (r1 - r0) / (z1 - z0)
+            grow = margin * math.hypot(1, slope)
+            ra, rb = r0 + grow - slope * margin, r1 + grow + slope * margin
             a = dm.add(tip, dm.scale(self.axis, z0 - margin))
             b = dm.add(tip, dm.scale(self.axis, z1 + margin))
-            lo, hi = _cylinder_bounds(a, b, max(r0, r1) + grow, self.axis)
+            lo, hi = _cylinder_bounds(a, b, max(ra, rb), self.axis)
             limit = self.width + grow + df.PATH_TOL
             for body in obstacles:
                 if not _overlap(lo, hi, body, self._boxes):
                     continue
-                cone = self.temp.createCylinderOrCone(adsk.core.Point3D.create(*a), r0 + grow,
-                                                      adsk.core.Point3D.create(*b), r1 + grow)
+                cone = self.temp.createCylinderOrCone(adsk.core.Point3D.create(*a), ra,
+                                                      adsk.core.Point3D.create(*b), rb)
                 if not cone or not self.temp.booleanOperation(
                         cone, body, adsk.fusion.BooleanTypes.IntersectionBooleanType):
                     raise dm.DeburrError('could not check chamfer cutter clearance')
@@ -183,9 +188,10 @@ class Clearance:
                     continue
                 if body in self.fixtures:
                     return 'cutter touches fixture'
-                # The removed region is bounded by its edges: a cone and a
-                # locally convex wedge meet in a convex region, whose farthest
-                # points from an edge line lie on its boundary curves.
+                # Assumption: the removed region's farthest points from the
+                # selected edges lie on its boundary curves. That holds for a
+                # cone meeting planar faces near one straight edge (a convex
+                # region); at curved faces and near corners it is approximate.
                 samples = [df._tup(v.geometry) for v in cone.vertices]
                 for edge in cone.edges:
                     ev = edge.evaluator
@@ -271,8 +277,8 @@ def _directions(edges, axis):
 def add_access(points, directions, clearance, retreats=None):
     """Move horizontally (or upward) outside every obstacle before Trace links.
 
-    A back-side cut cannot leave sideways or straight up, so an endpoint with a
-    known retreat also tries stepping toward the tool axis, then rising.
+    A back-side cut cannot leave sideways or straight up, so `retreats(point)`
+    may offer (direction, distance) steps toward the tool axis, then rising.
     Return an open curve even when the cutting contour is closed. Trace must
     start and finish at the exterior endpoints, rather than choose a seam.
     """
@@ -291,9 +297,7 @@ def add_access(points, directions, clearance, retreats=None):
             # plane for a lateral direction or rises farther for an upward one.
             if clearance.path([outer, point]) is None:
                 return [outer]
-        retreat = (retreats or {}).get(point)
-        if retreat:
-            direction, distance = retreat
+        for direction, distance in (retreats(point) if retreats else ()):
             side = dm.add(point, dm.scale(direction, distance))
             outer = outward(side, clearance.axis, extra)
             if clearance.path([outer, side, point]) is None:
@@ -302,6 +306,38 @@ def add_access(points, directions, clearance, retreats=None):
     # Different exterior endpoints prevent Trace from treating the entire
     # approach/cut/withdrawal curve as a closed contour with a movable seam.
     return access(points[0]) + points + access(points[-1], .1)[::-1]
+
+
+def _retreat_finder(segments, variant, axis, width):
+    """Function(endpoint) -> candidate (direction, distance) retreats.
+
+    Chain endpoints are segment ends, or crossing points trimmed back from
+    them at concave joints, so candidates come from the nearest segment ends.
+    Where two ends meet (a concave corner), the combined step clears both.
+    A retreat that cannot be computed is simply not offered.
+    """
+    if not hasattr(variant, 'retreat'):
+        return None
+    ends = []
+    for seg in segments:
+        for end, tip in ((seg.start, seg.tips[0]), (seg.end, seg.tips[-1])):
+            try:
+                ends.append((tip, variant.retreat(end.vertex, *end.normals.values(), axis, width)))
+            except dm.DeburrError:
+                continue
+
+    def find(point):
+        near = sorted(ends, key=lambda e: dc.dist(e[0], point))[:2]
+        options = [r for _, r in near]
+        if len(near) == 2 and dm.dot(near[0][1][0], near[1][1][0]) < .999:
+            combined = dm.add(near[0][1][0], near[1][1][0])
+            if dm.dot(combined, combined) > 1e-12:
+                combined = dm.normalize(combined)
+                cosines = [dm.dot(combined, d) for (d, _) in options]
+                if min(cosines) > .1:
+                    options.append((combined, max(dist / c for (_, dist), c in zip(options, cosines))))
+        return options
+    return find
 
 
 def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=()):
@@ -316,7 +352,7 @@ def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=()):
     edges = setup_edges(edges, bodies)
     clearance = Clearance(cutter, axis, bodies, fixtures, width, edges)
     ids = df._FaceIds()
-    variants = cutter.variants() if hasattr(cutter, 'variants') else (cutter,)
+    variants = cutter.variants()
     groups = [[] for _ in variants]
     for i, edge in enumerate(edges):
         errors = []
@@ -333,11 +369,7 @@ def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=()):
     chains, notes = [], []
     directions = _directions(edges, axis)
     for segments, variant in zip(groups, variants):
-        retreats = {}
-        if hasattr(variant, 'retreat'):
-            for seg in segments:
-                for end, tip in ((seg.start, seg.tips[0]), (seg.end, seg.tips[-1])):
-                    retreats[tip] = variant.retreat(end.vertex, *end.normals.values(), axis, width)
+        retreats = _retreat_finder(segments, variant, axis, width)
         for ordered, closed in dc.order_chains(segments):
             depth = None
             if not hasattr(variant, 'frustums'):

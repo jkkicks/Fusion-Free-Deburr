@@ -54,9 +54,20 @@ def tool_from_json(text):
     unit = {'inches': 'in', 'millimeters': 'mm'}.get(raw.get('unit'))
     if (raw.get('type') == THREAD_MILL and unit and isinstance(want, (int, float))
             and math.isfinite(want) and want > 0):
-        got = json.loads(tool.toJson()).get('geometry', {}).get('shoulder-diameter')
-        if not isinstance(got, (int, float)) or abs(got - want) > 1e-9:
-            tool.parameters.itemByName('tool_shoulderDiameter').expression = f'{want} {unit}'
+        def neck():
+            got = json.loads(tool.toJson()).get('geometry', {}).get('shoulder-diameter')
+            return got if isinstance(got, (int, float)) else None
+        got = neck()
+        if got is None or abs(got - want) > 1e-9:
+            param = tool.parameters.itemByName('tool_shoulderDiameter')
+            if not param:
+                raise ValueError('Fusion changed the thread mill neck diameter on import '
+                                 'and it could not be restored.')
+            param.expression = f'{want:.10f}'.rstrip('0').rstrip('.') + ' ' + unit
+            got = neck()
+            if got is None or abs(got - want) > 1e-6:
+                raise ValueError('Fusion changed the thread mill neck diameter on import '
+                                 'and it could not be restored.')
     return tool
 
 

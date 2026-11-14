@@ -61,7 +61,8 @@ def build_assets(root, version, source_sha, repository):
         'schema_version': 1, 'version': version,
         'channel': 'preview' if '-' in version else 'stable',
         'source_sha': source_sha, 'addin_id': manifest['id'],
-        'supported_os': ['windows'],
+        # Must agree with what Fusion is told in the packaged manifest.
+        'supported_os': packed['supportedOS'].split('|'),
         # No loader exists in legacy installations. They must install manually once.
         'installation_mode': 'manual', 'minimum_loader_version': 1,
         'release_notes_url': release_url,

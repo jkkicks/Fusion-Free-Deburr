@@ -65,7 +65,9 @@ class LollipopTests(unittest.TestCase):
         with patch.object(lf, 'Clearance'), patch.object(lf, '_directions', return_value=[]), \
                 patch.object(lf.df, 'edge_segment', return_value='segment') as sample, \
                 patch.object(lf.dc, 'order_chains', return_value=[]):
-            chains, used, notes = lf.build_chains([picked], NS(radius=.4), .02,
+            cutter = NS(radius=.4)
+            cutter.variants = lambda: (cutter,)
+            chains, used, notes = lf.build_chains([picked], cutter, .02,
                                                  (0, 0, 1), [body])
         self.assertIs(sample.call_args.args[0], native)
         self.assertIs(used[0], native)
@@ -278,10 +280,154 @@ class ChamferCheckTests(unittest.TestCase):
         check = NS(bodies=[NS(boundingBox=box)], fixtures=[], axis=(0, 0, 1),
                    cutter=NS(radius=.6, noncutting_sections=()),
                    path=MagicMock(side_effect=lateral_or_vertical))
-        retreats = {start: ((1, 0, 0), .3), end: ((-1, 0, 0), .2)}
-        result = lf.add_access([start, end], [(0, -1, 0), (0, 0, 1)], check, retreats)
+        retreats = {start: [((1, 0, 0), .3)], end: [((-1, 0, 0), .2)]}
+        result = lf.add_access([start, end], [(0, -1, 0), (0, 0, 1)], check, retreats.get)
         self.assertEqual(result[2:4], [start, end])
         self.assertEqual(result[1], (.3, 0, .2))
         self.assertEqual(result[4], (-.1, 0, .2))
         self.assertGreater(result[0][2], 1)
         self.assertGreater(result[5][2], result[0][2])
+
+
+class ChamferWiringTests(unittest.TestCase):
+    """The real build_chains loop, cut-region sampling, and Trace safety settings."""
+
+    def test_inflated_flank_covers_margin_everywhere(self):
+        for flank in ((0, .3, .3, .6), (.3, .6, .6, .3), (0, .1, .05, .6)):
+            calls = []
+            temp = MagicMock()
+            def cone(a, ra, b, rb):
+                calls.append((a, ra, b, rb))
+                result = MagicMock(); result.faces.count = 0
+                return result
+            temp.createCylinderOrCone.side_effect = cone
+            check = lf.Clearance(NS(radius=.6, noncutting_sections=(), frustums=(flank,)),
+                                 (0, 0, 1), [NS()], [], .05, edges=['e'])
+            check.temp = temp
+            margin = .01
+            with patch.object(lf, '_overlap', return_value=True), \
+                    patch.object(adsk.core.Point3D, 'create', side_effect=lambda *p: p):
+                self.assertIsNone(check.point((0, 0, 0), margin))
+            (a, ra, b, rb), = calls
+            z0, r0, z1, r1 = flank
+            def inflated(z):
+                return ra + (rb - ra) * (z - a[2]) / (b[2] - a[2])
+            # Every point within `margin` of the flank surface or its rims is inside.
+            length = math.hypot(z1 - z0, r1 - r0)
+            normal = ((z1 - z0) / length, -(r1 - r0) / length)       # (radial, axial)
+            for t in [i / 20 for i in range(21)]:
+                z, r = z0 + (z1 - z0) * t, r0 + (r1 - r0) * t
+                for ang in range(0, 360, 10):
+                    dr = margin * math.cos(math.radians(ang)); dz = margin * math.sin(math.radians(ang))
+                    if dr * normal[0] + dz * normal[1] < 0 and 0 < t < 1:
+                        continue   # inward side of the surface is inside the tool already
+                    pz, pr = z + dz, r + dr
+                    with self.subTest(flank=flank, t=t, ang=ang):
+                        self.assertGreaterEqual(pz, a[2] - 1e-12)
+                        self.assertLessEqual(pz, b[2] + 1e-12)
+                        self.assertLessEqual(pr, inflated(pz) + 1e-9)
+
+    def test_cut_region_edges_are_sampled_and_prefiltered(self):
+        # One selected edge along x at the origin; the removed region has an
+        # edge whose stroke points run 0..0.04 cm away from it, then one at 0.3.
+        edge = NS(boundingBox=NS(minPoint=NS(x=-1, y=0, z=0), maxPoint=NS(x=1, y=0, z=0)))
+        far = NS(boundingBox=NS(minPoint=NS(x=5, y=5, z=5), maxPoint=NS(x=6, y=6, z=6)))
+        measure = MagicMock()
+        measure.measureMinimumDistance.side_effect = lambda p, e: NS(value=math.hypot(p[1], p[2]))
+        for reach, expected in ((.04, None), (.3, 'away from the selected edges')):
+            stroke = [NS(x=0, y=0, z=0), NS(x=.1, y=reach, z=0)]
+            cut_edge = NS(evaluator=NS(getParameterExtents=lambda: (True, 0, 1),
+                                       getStrokes=lambda t0, t1, tol, s=stroke: (True, s)))
+            cut = MagicMock(); cut.faces.count = 1; cut.vertices = []; cut.edges = [cut_edge]
+            check = lf.Clearance(NS(radius=.6, noncutting_sections=(), frustums=((0, .3, .3, .6),)),
+                                 (0, 0, 1), [NS()], [], .05, edges=[far, edge])
+            check.measure = measure
+            check.temp = MagicMock(); check.temp.createCylinderOrCone.return_value = cut
+            with self.subTest(reach=reach), patch.object(lf, '_overlap', return_value=True), \
+                    patch.object(adsk.core.Point3D, 'create', side_effect=lambda *p: p):
+                result = check.point((0, 0, 0), .001)
+                if expected:
+                    self.assertIn(expected, result)
+                else:
+                    self.assertIsNone(result)
+            # The far edge's box never reaches a distance measurement.
+            self.assertTrue(all(call.args[1] is edge for call in measure.measureMinimumDistance.call_args_list))
+
+    def test_build_chains_runs_cones_without_ball_depth_and_offers_retreats(self):
+        from FusionFreeDeburr import cutter_profile as cp
+        harvey = {'type': 'thread mill', 'unit': 'inches',
+                  'geometry': {'DC': .5, 'thread-profile-angle': 90, 'LCF': .25, 'SFDM': .25,
+                               'shoulder-diameter': .25, 'shoulder-length': .25, 'OAL': 3.25,
+                               'thread-tip-type': 'point', 'NT': 1}}
+        tool = cp.from_tool_json(harvey)
+        back = tool.variants()[1]
+        # Bottom rim of a square through-hole (material outside the square,
+        # z > 0): four back-side edges meeting at concave corners.
+        down = (0, 0, -1)
+        corners = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        walls = [(0, 1, 0), (-1, 0, 0), (0, -1, 0), (1, 0, 0)]   # wall normals point into the hole
+        segments = []
+        for k in range(4):
+            a, b, n = corners[k], corners[(k + 1) % 4], walls[k]
+            ids = {'bottom': down, f'wall{k}': n}
+            tips = [back.tip(p, down, n, (0, 0, 1), .05) for p in (a, b)]
+            t = dm.normalize(dm.sub(b, a))
+            segments.append(lf.dc.Segment(tips, lf.dc.End(a, ids, t), lf.dc.End(b, ids, dm.scale(t, -1)),
+                                          start_key=k, end_key=(k + 1) % 4))
+        edges = [NS(i=k) for k in range(4)]
+        seg_of = {id(e): s for e, s in zip(edges, segments)}
+
+        def edge_segment(edge, radius, width, axis, ids, variant):
+            if variant.name != 'back side':
+                raise dm.DeburrError('cutter flank cannot reach this edge')
+            return seg_of[id(edge)]
+        captured = []
+        def add_access(points, directions, clearance, retreats=None):
+            captured.append((points, retreats))
+            return points
+        with patch.object(lf, 'setup_edges', side_effect=lambda e, b: e), \
+                patch.object(lf, 'Clearance') as clearance, \
+                patch.object(lf, '_directions', return_value=[]), \
+                patch.object(lf.df, 'edge_segment', side_effect=edge_segment), \
+                patch.object(lf.df, '_cut_depth', side_effect=AssertionError('ball depth used for a cone')), \
+                patch.object(lf, 'add_access', side_effect=add_access):
+            clearance.return_value.path.return_value = None
+            chains, used, notes = lf.build_chains(edges, tool, .05, (0, 0, 1), [])
+        self.assertEqual(len(chains), 1)
+        (points, retreats), = captured
+        self.assertTrue(callable(retreats))
+        # The closed loop starts at a trimmed concave corner; a combined step
+        # toward the hole center is offered there, clearing both walls.
+        options = retreats(points[0])
+        directions = [d for d, _ in options]
+        self.assertTrue(any(d[0] * d[1] != 0 for d in directions), options)
+        for d, dist in options:
+            self.assertGreater(dist, 0)
+
+    def test_chamfer_tool_requires_disabled_trace_chamfer(self):
+        def operation(do_chamfer_present, reads_back):
+            params = {name: NS(expression=None) for name, _ in fusion.TRACE_EXPRESSIONS}
+            params['tool_type'] = NS(value=NS(value='chamfer mill'))
+            if not do_chamfer_present:
+                del params['doChamfer']
+            else:
+                params['doChamfer'].value = NS(value=not reads_back)
+            return NS(parameters=NS(itemByName=params.get))
+        fusion._trace_settings(operation(True, True))
+        with self.assertRaisesRegex(dm.DeburrError, 'doChamfer'):
+            fusion._trace_settings(operation(False, True))
+        with self.assertRaisesRegex(dm.DeburrError, 'could not be disabled'):
+            fusion._trace_settings(operation(True, False))
+
+    def test_edit_assigns_tool_before_trace_settings(self):
+        order = []
+        op = MagicMock()
+        type(op).tool = property(lambda self: 'old', lambda self, v: order.append('tool'))
+        with patch.object(fusion, 'load_settings', return_value={}), \
+                patch.object(fusion, 'find_by_token', return_value=None), \
+                patch.object(fusion, '_curves_parameter'), \
+                patch.object(fusion, 'build_sketch', return_value=(MagicMock(), [])), \
+                patch.object(fusion, 'update_trace_curves', side_effect=lambda *a: order.append('settings')), \
+                patch.object(fusion, 'save_settings'):
+            fusion.update_operation(MagicMock(), op, [], [], .05, tool='new')
+        self.assertEqual(order[:2], ['tool', 'settings'])

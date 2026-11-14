@@ -121,7 +121,12 @@ def chamfer_plane(n1, n2, tool_axis, sin_flank):
     options = [a for a in options if margin <= a <= psi - margin]
     if not options:
         raise DeburrError('cutter flank cannot reach this edge')
-    phi = min(options, key=lambda a: abs(a - psi / 2))
+    options.sort(key=lambda a: abs(a - psi / 2))
+    # On a ridge symmetric about the axis both sides are equally valid, and
+    # noise in sampled normals would flip the tool across it between samples.
+    if len(options) == 2 and abs(abs(options[1] - psi / 2) - abs(options[0] - psi / 2)) < margin / 5:
+        raise DeburrError('cutter could chamfer this ridge from either side')
+    phi = options[0]
     k = add(scale(e1, math.cos(phi)), scale(e2, math.sin(phi)))
     return k, phi, psi, e1, e2
 

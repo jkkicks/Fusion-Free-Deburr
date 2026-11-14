@@ -14,7 +14,7 @@ UPPER = (1.0, 2.0, 2.0, 1.0)    # back flank of the same double-angle cutter
 HARVEY = {'type': 'thread mill', 'unit': 'inches',
           'geometry': {'DC': .5, 'thread-profile-angle': 90, 'LCF': .25, 'SFDM': .25,
                        'shoulder-diameter': .25, 'shoulder-length': .25, 'OAL': 3.25,
-                       'thread-tip-type': 'point'}}
+                       'thread-tip-type': 'point', 'NT': 1}}
 
 
 def surface_gap(x, tip, flank, axis=Z):
@@ -104,6 +104,16 @@ class ConeTipTests(unittest.TestCase):
                     self.assertGreater(lowest, -1e-3)   # never past the chamfer plane
                     self.assertLess(lowest, 2e-3)       # and tangent to it
 
+    def test_symmetric_ridge_is_rejected_instead_of_picking_a_side_by_noise(self):
+        a = math.radians(60)
+        left, right = (-math.sin(a), 0, math.cos(a)), (math.sin(a), 0, math.cos(a))
+        for n1, n2 in ((left, right), (right, left), (left, dm.add(right, (0, 0, 1e-15)))):
+            with self.assertRaisesRegex(dm.DeburrError, 'either side'):
+                dm.cone_tip((0, 0, 0), n1, n2, Z, .05, LOWER)
+        # A clearly asymmetric ridge still has one well-defined side.
+        tilted = (math.sin(math.radians(80)), 0, math.cos(math.radians(80)))
+        dm.cone_tip((0, 0, 0), left, tilted, Z, .05, LOWER)
+
     def test_steep_or_oversized_cuts_are_rejected(self):
         # Edge rising at 60 degrees: steeper than a 45 degree flank allows.
         steep = (math.cos(math.radians(60)), 0, math.sin(math.radians(60)))
@@ -130,6 +140,26 @@ class ChamferProfileTests(unittest.TestCase):
         names = [v.name for v in tool.variants()]
         self.assertEqual(names, ['topside', 'back side'])
 
+    def test_thread_profile_angle_is_measured_from_the_radial_line(self):
+        # 60 degree tooth, 0.1 in wide: depth (0.05 / tan 30) = 0.0866 in, so
+        # each flank is 60 degrees from the axis (a 60 degree chamfer face).
+        raw = copy.deepcopy(HARVEY)
+        raw['geometry'].update({'thread-profile-angle': 60, 'LCF': .1, 'shoulder-length': .1,
+                                'SFDM': .25, 'shoulder-diameter': .25})
+        z0, r0, z1, r1 = cp.from_tool_json(raw).frustums[0]
+        self.assertAlmostEqual(r1 - r0, .05 / math.tan(math.radians(30)) * 2.54)
+        self.assertAlmostEqual(math.degrees(math.atan2(r1 - r0, z1 - z0)), 60)
+        tip = cp.from_tool_json(raw).variants()[0].tip((0, 0, 0), Z, (1, 0, 0), Z, .02)
+        self.assertIsNotNone(tip)
+
+    def test_chamfer_mill_flutes_above_cone_are_body(self):
+        raw = {'type': 'chamfer mill', 'unit': 'millimeters',
+               'geometry': {'DC': 10, 'TA': 45, 'tip-diameter': 2, 'SFDM': 6, 'LCF': 12,
+                            'OAL': 60}}
+        sections = cp.from_tool_json(raw).noncutting_sections
+        self.assertAlmostEqual(sections[0][1], 1.2)
+        self.assertAlmostEqual(sections[0][2], .5)
+
     def test_chamfer_mill_is_topside_only(self):
         raw = {'type': 'chamfer mill', 'unit': 'millimeters',
                'geometry': {'DC': 10, 'TA': 45, 'tip-diameter': 2, 'SFDM': 10,
@@ -145,7 +175,7 @@ class ChamferProfileTests(unittest.TestCase):
     def test_inch_and_mm_definitions_match(self):
         mm = copy.deepcopy(HARVEY)
         mm['unit'] = 'millimeters'
-        mm['geometry'] = {k: v * 25.4 if isinstance(v, (int, float)) and k != 'thread-profile-angle'
+        mm['geometry'] = {k: v * 25.4 if isinstance(v, (int, float)) and k not in ('thread-profile-angle', 'NT')
                           else v for k, v in mm['geometry'].items()}
         for a, b in zip(cp.from_tool_json(HARVEY).frustums, cp.from_tool_json(mm).frustums):
             for x, y in zip(a, b):
@@ -154,16 +184,35 @@ class ChamferProfileTests(unittest.TestCase):
     def test_bad_chamfer_profiles_are_rejected(self):
         cases = (('thread-profile-angle', 180), ('thread-profile-angle', 0),
                  ('thread-tip-type', 'flat'), ('NT', 3), ('SFDM', .3), ('LCF', 1.0),
-                 ('shoulder-diameter', -.5))
+                 ('shoulder-diameter', -.5), ('shoulder-length', 'x'), ('shoulder-length', -1))
         for key, value in cases:
             raw = copy.deepcopy(HARVEY)
             raw['geometry'][key] = value
             with self.subTest(key=key, value=value), self.assertRaises(dm.DeburrError):
                 cp.from_tool_json(raw)
+        for key in ('NT', 'thread-tip-type'):   # missing keys fail closed
+            raw = copy.deepcopy(HARVEY)
+            del raw['geometry'][key]
+            with self.subTest(missing=key), self.assertRaises(dm.DeburrError):
+                cp.from_tool_json(raw)
         mill = {'type': 'chamfer mill', 'unit': 'millimeters',
                 'geometry': {'DC': 10, 'TA': 90, 'SFDM': 10, 'OAL': 60}}
         with self.assertRaises(dm.DeburrError):
             cp.from_tool_json(mill)
+
+    def test_retreat_clears_the_wall_under_a_sloped_back_edge(self):
+        cutter = cp.from_tool_json(HARVEY).variants()[1]
+        s = math.radians(30)
+        tangent = (math.cos(s), 0, math.sin(s))          # edge rising at 30 degrees
+        wall = (0, 1, 0)                                   # vertical wall, material y < 0
+        bottom = dm.cross(wall, tangent)                  # face below the edge, facing down
+        if bottom[2] > 0:
+            bottom = dm.scale(bottom, -1)
+        direction, distance = cutter.retreat((0, 0, 0), bottom, wall, Z, .05)
+        tip = cutter.tip((0, 0, 0), bottom, wall, Z, .05)
+        moved = dm.add(tip, dm.scale(direction, distance))
+        self.assertAlmostEqual(direction[0], 0, places=9)  # perpendicular to the edge in plan
+        self.assertAlmostEqual(moved[1] - cutter.radius, .05 + cp.RETREAT_CLEARANCE)
 
     def test_retreat_frees_back_flank_from_the_wall(self):
         cutter = cp.from_tool_json(HARVEY).variants()[1]

@@ -12,6 +12,7 @@ import math
 
 from . import deburr_math as dm
 
+# Same strings as cam_tools, which imports adsk; this module must not.
 CHAMFER_TYPES = ('chamfer mill', 'thread mill')
 
 
@@ -30,6 +31,13 @@ class SphericalCutter:
         return (self,)
 
 
+RETREAT_CLEARANCE = .02  # cm
+
+
+def _max_radius(frustums):
+    return max(max(f[1], f[3]) for f in frustums)
+
+
 @dataclass(frozen=True)
 class ConeCutter:
     """One conical flank in contact; every flank still counts as cutting edge
@@ -41,23 +49,31 @@ class ConeCutter:
 
     @property
     def radius(self):
-        return max(max(f[1], f[3]) for f in self.frustums)
+        return _max_radius(self.frustums)
+
+    def variants(self):
+        return (self,)
 
     def tip(self, p, n1, n2, tool_axis, width):
         return dm.cone_tip(p, n1, n2, tool_axis, width, self.flank)[0]
 
     def retreat(self, p, n1, n2, tool_axis, width):
         """(horizontal direction, distance) that frees the tool from the cut so
-        it can move along its axis; used for back-side entry and exit."""
-        tip, direction = dm.cone_tip(p, n1, n2, tool_axis, width, self.flank)
+        it can move along its axis; used for back-side entry and exit.
+
+        The step is perpendicular, in plan, to the edge: the wall below a
+        back-side edge runs along the edge, so only that component clears it.
+        """
+        tip, toward_axis = dm.cone_tip(p, n1, n2, tool_axis, width, self.flank)
         z = dm.normalize(tool_axis)
-        offset = dm.sub(tip, p)
-        lateral = dm.sub(offset, dm.scale(z, dm.dot(offset, z)))
-        reach = math.sqrt(dm.dot(lateral, lateral))
+        tangent = dm.cross(dm.normalize(n1), dm.normalize(n2))
+        tangent = dm.sub(tangent, dm.scale(z, dm.dot(tangent, z)))
+        direction = toward_axis
+        if dm.dot(tangent, tangent) > 1e-12:
+            tangent = dm.normalize(tangent)
+            direction = dm.normalize(dm.sub(toward_axis, dm.scale(tangent, dm.dot(toward_axis, tangent))))
+        reach = dm.dot(dm.sub(tip, p), direction)   # axis distance from the edge, in plan
         return direction, max(0.0, self.radius - reach) + width + RETREAT_CLEARANCE
-
-
-RETREAT_CLEARANCE = .02  # cm
 
 
 @dataclass(frozen=True)
@@ -68,7 +84,7 @@ class ConeTool:
 
     @property
     def radius(self):
-        return max(max(f[1], f[3]) for f in self.frustums)
+        return _max_radius(self.frustums)
 
     def variants(self):
         """Single-flank cutters, topside first."""
@@ -154,27 +170,41 @@ def from_tool_json(raw):
 
 def _cone_tool(raw, g, scale, length):
     """Chamfer mill: one flank widening from the tip diameter to DC at the
-    taper angle TA (half the included angle). Thread mill: one pointed tooth
-    of the profile angle, spanning the flute length LCF from the tip, with DC
-    at its point (a double-angle cutter). Bodies above the flanks are
-    noncutting; nothing narrower than the profile is assumed."""
+    taper angle TA (half the included angle, from the axis). Thread mill: one
+    pointed tooth spanning the flute length LCF from the tip, with DC at its
+    point; the profile angle is the included angle between the flanks,
+    measured from the radial line as for a thread form (a double-angle
+    cutter). Bodies above the flanks are noncutting; nothing narrower than
+    the profile is assumed."""
+    def optional(key):
+        """A dimension that may be absent or zero (cm), never negative or junk."""
+        v = g.get(key, 0)
+        if v is None:
+            v = 0
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+            raise dm.DeburrError('invalid tool dimension: ' + key)
+        return v * scale
+
     radius, overall = length('DC') / 2, length('OAL')
+    shoulder_length = optional('shoulder-length')
     if raw['type'] == 'chamfer mill':
         half = g.get('TA')
         if not _positive(half) or half >= 90:
             raise dm.DeburrError('chamfer mill needs a taper angle between 0 and 90 degrees')
-        tip = g.get('tip-diameter', 0)
-        if not (isinstance(tip, (int, float)) and math.isfinite(tip) and 0 <= tip * scale / 2 < radius):
+        tip = optional('tip-diameter') / 2
+        if not tip < radius:
             raise dm.DeburrError('chamfer mill tip diameter must be smaller than its diameter')
-        tip *= scale / 2
         top = (radius - tip) / math.tan(math.radians(half))
         frustums = ((0.0, tip, top, radius),)
-        body = max(radius, (g.get('shoulder-diameter') or 0) * scale / 2)
+        # Flutes may continue above the cone at full diameter: model that band,
+        # and any shoulder, as a noncutting body at least as wide as DC.
+        shoulder = max(top, shoulder_length, optional('LCF'))
+        body = max(radius, optional('shoulder-diameter') / 2)
     else:
         angle = g.get('thread-profile-angle')
         if not _positive(angle) or angle >= 180:
             raise dm.DeburrError('thread mill needs a profile angle between 0 and 180 degrees')
-        if g.get('thread-tip-type', 'point') != 'point' or g.get('NT', 1) != 1:
+        if g.get('thread-tip-type') != 'point' or g.get('NT') != 1:
             raise dm.DeburrError('only pointed single-profile (one tooth) thread mills are supported')
         neck = g.get('shoulder-diameter')
         if isinstance(neck, (int, float)) and neck < 0:
@@ -183,18 +213,15 @@ def _cone_tool(raw, g, scale, length):
             raise dm.DeburrError('thread mill neck diameter is negative; set its pitch '
                                  'to the cutter width and its shoulder diameter to the neck')
         top = length('LCF')
-        root = radius - top / 2 * math.tan(math.radians(angle / 2))
+        root = radius - (top / 2) / math.tan(math.radians(angle / 2))
         if root <= 0:
             raise dm.DeburrError('thread mill flute length is too long for its diameter and angle')
         frustums = ((0.0, root, top / 2, radius), (top / 2, radius, top, root))
-        body = (g.get('shoulder-diameter') or 0) * scale / 2
-    shoulder = max(top, (g.get('shoulder-length') or 0) * scale)
-    if raw['type'] == 'thread mill':
-        # Whatever sits directly on the tooth must not overhang its root.
-        above = body if shoulder > top and body > 0 else length('SFDM') / 2
-        if shoulder > top and body <= 0:
-            body = above
-        if above > root * (1 + 1e-6):
+        shoulder = max(top, shoulder_length)
+        neck = optional('shoulder-diameter') / 2
+        # A neck section exists only above the tooth; otherwise the shank sits on it.
+        body = neck if shoulder > top and neck > 0 else length('SFDM') / 2
+        if body > root * (1 + 1e-6):
             raise dm.DeburrError('thread mill neck or shank must not be wider than the tooth root')
     if not shoulder < overall:
         raise dm.DeburrError('invalid chamfer cutter shoulder or overall length')
