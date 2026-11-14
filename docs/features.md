@@ -19,19 +19,25 @@ feature updates it.
 | Tool picker window: document tools, local libraries and cloud libraries | `FusionFreeDeburr/tool_picker.py`, `cam_tools.py`, `resources/tool_picker/index.html` |
 | **Ball endmill** edge breaks of a set width | `deburr_math.py` (`ball_center`, `tool_tip`) |
 | **Lollipop mill** edge breaks, including undercuts, side pockets and other edges reached from below or the side | `deburr_math.py` (`lollipop_contact_height`), `lollipop_fusion.py` |
-| Reading cutter shape (head, neck, shaft, holder) from Fusion tool data | `cutter_profile.py` |
-| Linking selected edges into continuous paths, with rolls around corners | `deburr_chain.py` |
-| Sampling curved edges to tolerance, drawing the 3D sketch and creating the Trace operation | `deburr_fusion.py` |
+| **Chamfer mill** edge breaks on topside edges: a flat chamfer at the flank angle, centered on the flank; the width is the larger chamfer leg | `deburr_math.py` (`chamfer_plane`, `cone_tip`), `cutter_profile.py` (`ConeCutter`) |
+| **Double-angle (front and back) chamfer cutters**, defined as a pointed single-profile **thread mill**: each edge uses the top flank if it can, otherwise the back flank (for example the bottom rim of a through hole); chains split where the flank changes | `cutter_profile.py` (`ConeTool`, `_cone_tool`), `lollipop_fusion.py` (`build_chains`) |
+| Reading cutter shape (head or flanks, neck, shaft, holder) from Fusion tool data | `cutter_profile.py` |
+| Thread mills keep their neck diameter on import (Fusion recomputes it from pitch) | `cam_tools.py` (`tool_from_json`) |
+| Linking selected edges into continuous paths, with rolls around corners (refined to a 0.005 mm chord for cutter models) | `deburr_chain.py` (`corner_roll`) |
+| Sampling curved edges to tolerance, drawing the 3D sketch and creating the Trace operation (Trace's own chamfer option is forced off for chamfer tools) | `deburr_fusion.py` |
 | Safety: skips edges that aren't sharp and convex, rejects gouges | `deburr_fusion.py`, `deburr_chain.py` |
-| Safety: neck, shaft, holder and fixture clearance checks against setup models and other bodies; rejects cuts away from the selected edges | `lollipop_fusion.py` (`Clearance`) |
-| Approach and withdrawal moves outside the part | `lollipop_fusion.py` (`add_access`) |
+| Safety: neck, shaft, holder and fixture clearance checks against setup models and other bodies; rejects cuts away from the selected edges, including chamfer flank cuts outside the edge break (checked at sampled points) | `lollipop_fusion.py` (`Clearance`) |
+| Safety: rejects ridges a chamfer cutter could cut equally well from either side | `deburr_math.py` (`chamfer_plane`) |
+| Approach and withdrawal moves outside the part; back-side chamfer cuts step toward the tool axis, then move along it | `lollipop_fusion.py` (`add_access`, `_retreat_finder`) |
+| Reuses an identical document tool without a GUID instead of importing a copy | `ball_deburr_command.py` |
 | Settings saved on the operation so it can be edited later; failed edits roll back | `deburr_fusion.py` (`save_settings`, `load_settings`, `update_operation`) |
 | Updates run after the dialog closes, so Fusion's undo and commands stay stable | `ball_deburr_command.py` (`DeburrJob`) |
 | Windows and macOS | `FusionFreeDeburr/FusionFreeDeburr.manifest` (`supportedOS`) |
 | Toolbar icons | `tools/make_icons.py` generates `resources/BallDeburr/` |
 
-Supported Fusion tool types: `ball end mill` and `lollipop mill`. Other types,
-such as flat endmills, are rejected.
+Supported Fusion tool types: `ball end mill`, `lollipop mill`, `chamfer mill`,
+and pointed single-profile `thread mill` (used for double-angle cutters). Other
+types, such as flat endmills and multi-tooth thread mills, are rejected.
 
 ## Project infrastructure
 
@@ -45,10 +51,6 @@ such as flat endmills, are rejected.
 
 ## In review
 
-- **Chamfer mills** for topside edges, and **double-angle (front and back)
-  chamfer cutters** defined as a single-profile thread mill, including
-  back-side edges such as the bottom of a through hole. See
-  [PR #7](https://github.com/jkkicks/Fusion-Free-Deburr/pull/7).
 - **Lollipop lead-in and approach options** (ramped lead-in, inside or outside
   approach, clearance and lead angle inputs). Planned in
   [PR #6](https://github.com/jkkicks/Fusion-Free-Deburr/pull/6).

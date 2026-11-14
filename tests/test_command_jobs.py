@@ -162,6 +162,41 @@ class CommandJobTests(unittest.TestCase):
             self.assertIs(cmd._job_tool(NS(documentToolLibrary=[]), job), create.return_value)
             create.assert_called_once_with(raw)
 
+    def test_document_tool_without_guid_is_reused_when_identical(self):
+        raw = {'guid': '', 'type': 'thread mill', 'geometry': {'DC': .5}}
+        other = NS(toJson=lambda: json.dumps({'guid': '', 'geometry': {'DC': .25}}))
+        tool = NS(toJson=lambda: json.dumps(raw))
+        job = NS(keep_current_tool=False, tool_json=json.dumps(raw))
+        with patch.object(adsk.cam.Tool, 'createFromJson') as create:
+            self.assertIs(cmd._job_tool(NS(documentToolLibrary=[other, tool]), job), tool)
+            create.assert_not_called()
+
+    def test_reimported_thread_mill_keeps_its_neck(self):
+        raw = {'type': 'thread mill', 'unit': 'inches', 'geometry': {'shoulder-diameter': .25}}
+        for got, repaired in ((-.5, True), (.25, False)):
+            state = {'neck': got}
+
+            class Param:
+                expression = 'unchanged'
+
+                def __setattr__(self, name, value):
+                    object.__setattr__(self, name, value)
+                    state['neck'] = float(value.split()[0])
+            param = Param()
+            imported = MagicMock()
+            imported.toJson.side_effect = lambda: json.dumps({'geometry': {'shoulder-diameter': state['neck']}})
+            imported.parameters.itemByName.return_value = param
+            with self.subTest(got=got), patch.object(adsk.cam.Tool, 'createFromJson',
+                                                     return_value=imported):
+                self.assertIs(cmd.cam_tools.tool_from_json(json.dumps(raw)), imported)
+                self.assertEqual(param.expression, '0.25 in' if repaired else 'unchanged')
+        # A neck Fusion refuses to restore is an error, not a silently different tool.
+        imported = MagicMock()
+        imported.toJson.return_value = json.dumps({'geometry': {'shoulder-diameter': -.5}})
+        with patch.object(adsk.cam.Tool, 'createFromJson', return_value=imported), \
+                self.assertRaisesRegex(ValueError, 'neck diameter'):
+            cmd.cam_tools.tool_from_json(json.dumps(raw))
+
     def test_changed_document_tool_is_not_silently_reimported(self):
         tool = NS(toJson=lambda: json.dumps({'guid': 'tool-id', 'geometry': {'DC': 10}}))
         job = NS(keep_current_tool=False,

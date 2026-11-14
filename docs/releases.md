@@ -116,7 +116,7 @@ releases say `preview`; treat them as nightly. The future updater should:
 ## Update contract and remaining implementation
 
 The ZIP is the single installation payload. `update.json` schema 1 records the
-app ID, version, channel, source SHA, Windows support, release notes URL, payload
+app ID, version, channel, source SHA, supported OSes (from the manifest), release notes URL, payload
 URL, byte size and SHA-256. The source manifest remains a development baseline;
 the manifest inside each release ZIP contains the release's exact version.
 

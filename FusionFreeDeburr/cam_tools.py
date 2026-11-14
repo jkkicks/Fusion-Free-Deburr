@@ -19,6 +19,10 @@ import adsk.cam
 
 BALL_END_MILL = 'ball end mill'
 LOLLIPOP_MILL = 'lollipop mill'
+CHAMFER_MILL = 'chamfer mill'
+THREAD_MILL = 'thread mill'
+# Tool types read from their full JSON profile, with every move clearance-checked.
+PROFILE_TYPES = (LOLLIPOP_MILL, CHAMFER_MILL, THREAD_MILL)
 _UNIT_TO_CM = {'inches': 2.54, 'millimeters': 0.1}
 
 
@@ -34,6 +38,37 @@ def tool_type(tool: adsk.cam.Tool) -> str:
 def diameter_cm(tool: adsk.cam.Tool) -> float:
     """Tool diameter in internal units (cm)."""
     return _param_value(tool, 'tool_diameter')
+
+
+def tool_from_json(text):
+    """Import a tool from JSON, undoing Fusion's thread-mill neck rewrite.
+
+    On import Fusion derives a thread mill's shoulder (neck) diameter from its
+    diameter and thread pitch. A pitch that differs from the cutter width, such
+    as one normalized to 1 in, yields a wrong or even negative neck, so Fusion
+    draws and simulates a different tool. Restore the neck the JSON specified.
+    """
+    tool = adsk.cam.Tool.createFromJson(text)
+    raw = json.loads(text)
+    want = raw.get('geometry', {}).get('shoulder-diameter')
+    unit = {'inches': 'in', 'millimeters': 'mm'}.get(raw.get('unit'))
+    if (raw.get('type') == THREAD_MILL and unit and isinstance(want, (int, float))
+            and math.isfinite(want) and want > 0):
+        def neck():
+            got = json.loads(tool.toJson()).get('geometry', {}).get('shoulder-diameter')
+            return got if isinstance(got, (int, float)) else None
+        got = neck()
+        if got is None or abs(got - want) > 1e-9:
+            param = tool.parameters.itemByName('tool_shoulderDiameter')
+            if not param:
+                raise ValueError('Fusion changed the thread mill neck diameter on import '
+                                 'and it could not be restored.')
+            param.expression = f'{want:.10f}'.rstrip('0').rstrip('.') + ' ' + unit
+            got = neck()
+            if got is None or abs(got - want) > 1e-6:
+                raise ValueError('Fusion changed the thread mill neck diameter on import '
+                                 'and it could not be restored.')
+    return tool
 
 
 def validate_ball_tool(tool):
@@ -137,5 +172,5 @@ class Catalog:
     def tool(self, id_) -> adsk.cam.Tool:
         """The Fusion Tool for an entry, created from JSON on first use for local tools."""
         if id_ not in self._tools and id_ in self._raw:
-            self._tools[id_] = adsk.cam.Tool.createFromJson(json.dumps(self._raw[id_]))
+            self._tools[id_] = tool_from_json(json.dumps(self._raw[id_]))
         return self._tools.get(id_)

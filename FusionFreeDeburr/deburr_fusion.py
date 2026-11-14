@@ -21,6 +21,8 @@ TRACE_EXPRESSIONS = (
     ('compensation', "'center'"), ('compensationType', "'off'"),
     ('axialOffset', '0 mm'), ('radialOffset', '0 mm'),
     ('doLeadIn', 'false'), ('doLeadOut', 'false'),
+    # Trace adds its own chamfer offset for chamfer mills unless disabled.
+    ('doChamfer', 'false'),
     ('preserveOrder', 'true'), ('orderByDepth', 'false'),
     ('smoothingFilter', 'false'), ('retractionPolicy', "'full'"),
     ('tolerance', '0.01 mm'))
@@ -289,14 +291,26 @@ def _apply_curves(value: adsk.cam.CadContours2dParameterValue, curve_chains):
     value.applyCurveSelections(selections)
 
 
+CHAMFER_TOOL_TYPES = ('chamfer mill', 'thread mill')
+
+
 def _trace_settings(op):
-    """Paths already describe the tool tip: disable Trace displacement."""
+    """Paths already describe the tool tip: disable Trace displacement.
+
+    Call after the operation's tool is assigned. For chamfer tools Fusion
+    turns Trace's own chamfer offset on by default, so it must exist and
+    must read back as off."""
+    kind = op.parameters.itemByName('tool_type')
+    chamfer_tool = bool(kind) and kind.value.value in CHAMFER_TOOL_TYPES
+    required = ('compensation', 'axialOffset') + (('doChamfer',) if chamfer_tool else ())
     for name, expression in TRACE_EXPRESSIONS:
         param = op.parameters.itemByName(name)
-        if not param and name in ('compensation', 'axialOffset'):
+        if not param and name in required:
             raise dm.DeburrError(f'Trace is missing required safety parameter: {name}')
         if param:
             param.expression = expression
+    if chamfer_tool and op.parameters.itemByName('doChamfer').value.value:
+        raise dm.DeburrError('Trace chamfer offset could not be disabled')
 
 
 def create_trace(setup: adsk.cam.Setup, curve_chains, name, tool=None):
@@ -336,9 +350,11 @@ def update_operation(design, op, chains, edges, width, tool=None):
     old_attr = op.attributes.itemByName(ATTR_GROUP, ATTR_NAME).value
     sketch, curves = build_sketch(design, chains, op.name + ' (new)')
     try:
-        update_trace_curves(op, curves)
+        # Assign the tool first: Fusion may re-default tool-dependent
+        # parameters such as doChamfer when the tool changes.
         if tool is not None:
             op.tool = tool
+        update_trace_curves(op, curves)
         if old_sketch:
             old_sketch.name = old_name + ' (old)'
         sketch.name = op.name

@@ -23,8 +23,11 @@ IN_DIAMETER = 'ballDiameter'
 IN_WIDTH = 'breakWidth'
 
 NEW_OP_LABEL = 'New operation'
-TOOL_TYPES = {cam_tools.BALL_END_MILL, cam_tools.LOLLIPOP_MILL}
+TOOL_TYPES = {cam_tools.BALL_END_MILL, *cam_tools.PROFILE_TYPES}
 DEFAULT_NAME = 'Ball Deburr'
+TYPE_NAMES = {cam_tools.LOLLIPOP_MILL: 'Lollipop Deburr',
+              cam_tools.CHAMFER_MILL: 'Chamfer Deburr',
+              cam_tools.THREAD_MILL: 'Chamfer Deburr'}
 DEFAULT_WIDTH = {'in': '0.02 in'}  # anything else falls back to mm
 DEFAULT_WIDTH_MM = '0.5 mm'
 
@@ -168,7 +171,7 @@ def _set_mode(inputs: adsk.core.CommandInputs, op):
 
 
 def _fill_tools(inputs: adsk.core.CommandInputs, select_id=None):
-    """Dropdown: current op tool, document ball/lollipop mills, then picked tools."""
+    """Dropdown: current op tool, supported document tools, then picked tools."""
     s = _session
     op = s.edit_op
     s.tool_choices = []
@@ -279,9 +282,9 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             edges.addSelectionFilter('Edges')
             edges.setSelectionLimits(1, 0)
 
-            inputs.addDropDownCommandInput(IN_TOOL, 'Ball / lollipop mill', dd_style)
+            inputs.addDropDownCommandInput(IN_TOOL, 'Deburr tool', dd_style)
             inputs.addBoolValueInput(IN_PICK, 'Tool library', False).text = 'Select tool...'
-            inputs.addTextBoxCommandInput(IN_DIAMETER, 'Ball diameter', '', 1, True)
+            inputs.addTextBoxCommandInput(IN_DIAMETER, 'Tool diameter', '', 1, True)
 
             units = s.units.defaultLengthUnits
             inputs.addValueInput(IN_WIDTH, 'Edge break width', units,
@@ -367,7 +370,7 @@ def _capture_job(inputs: adsk.core.CommandInputs, session):
     s = session
     choice = _selected_tool(inputs, s)
     if not choice:
-        raise ValueError('No ball or lollipop mill selected. Use "Select tool..." to pick one.')
+        raise ValueError('No deburr tool selected. Use "Select tool..." to pick one.')
     _, tool, is_current_tool, _ = choice
 
     sel = adsk.core.SelectionCommandInput.cast(inputs.itemById(IN_EDGES))
@@ -397,7 +400,12 @@ def _job_tool(cam, job):
     matching_guid = False
     for tool in cam.documentToolLibrary:
         current = json.loads(tool.toJson())
-        if current.get('guid') != snapshot.get('guid') or not snapshot.get('guid'):
+        if not snapshot.get('guid'):
+            # Without a GUID only an identical document tool is the same tool.
+            if current == snapshot:
+                return tool
+            continue
+        if current.get('guid') != snapshot.get('guid'):
             continue
         matching_guid = True
         if current == snapshot:
@@ -406,7 +414,7 @@ def _job_tool(cam, job):
             return tool
     if matching_guid:
         raise dm.DeburrError('The selected tool changed; run Deburr again to use its current definition.')
-    return adsk.cam.Tool.createFromJson(job.tool_json)
+    return cam_tools.tool_from_json(job.tool_json)
 
 
 def _apply_job(job):
@@ -426,7 +434,8 @@ def _apply_job(job):
         raise dm.DeburrError('The operation moved to another setup; run Deburr again.')
     tool = _job_tool(cam, job)
     cutter = None
-    if cam_tools.tool_type(tool) == cam_tools.LOLLIPOP_MILL:
+    kind = cam_tools.tool_type(tool)
+    if kind in cam_tools.PROFILE_TYPES:
         cutter = cutter_profile.from_tool_json(json.loads(tool.toJson()))
         radius = cutter.radius
     else:
@@ -456,7 +465,7 @@ def _apply_job(job):
         cam.generateToolpath(op)
         verb = 'Updated'
     else:
-        name = _unique_operation_name('Lollipop Deburr' if cutter is not None else DEFAULT_NAME, cam)
+        name = _unique_operation_name(TYPE_NAMES.get(kind, DEFAULT_NAME), cam)
         sketch, curve_chains = deburr_fusion.build_sketch(design, chains, name)
         try:
             op = deburr_fusion.create_trace(setup, curve_chains, name, tool)
