@@ -44,6 +44,12 @@ A rim can be reachable by the head while the neck or shaft hits the part. In tha
 
 *Select edges, choose a tool and set the edge-break width.*
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome, including from people using
+AI assistants. See [CONTRIBUTING.md](CONTRIBUTING.md) and check
+[what already exists](docs/features.md) first.
+
 ## How it works
 
 Fusion Free Deburr generates custom 3D sketch geometry and uses Fusion's native Trace strategy to create the toolpath.

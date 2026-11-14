@@ -1,0 +1,40 @@
+name: Bug report
+description: Something doesn't work or makes a wrong toolpath
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please search [existing issues](https://github.com/jkkicks/Fusion-Free-Deburr/issues?q=is%3Aissue) first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Paste any error text.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Part, cutter and selection
+      description: Cutter type and dimensions, edge-break width, which edges you selected, and the setup's tool orientation.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Add-in version, Fusion version, and Windows or macOS.
+      placeholder: 0.1.0-alpha, Fusion 2706.1.17, macOS
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Screenshots or part file
+      description: Screenshots help a lot. A part file, or a simplified one, helps even more.
+  - type: input
+    id: ai_tool
+    attributes:
+      label: AI assistant used, if any
+      placeholder: Codex, ChatGPT, Claude, Copilot...

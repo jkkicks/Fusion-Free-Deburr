@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: What already exists
+    url: https://github.com/jkkicks/Fusion-Free-Deburr/blob/main/docs/features.md
+    about: Check the feature list before asking for something new.
+  - name: Contributing guide
+    url: https://github.com/jkkicks/Fusion-Free-Deburr/blob/main/CONTRIBUTING.md
+    about: How to suggest changes, use an AI assistant, and open a pull request.
