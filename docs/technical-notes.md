@@ -269,5 +269,10 @@ imports the selected definition. Through the API in Fusion 2706.1.17 (macOS), in
 an unsaved scratch document holding an edited copy (#7) of that cloud tool, the
 apply step created a `Ball Deburr` on four top edges at 0.020 in with the cloud
 definition (#52) and a valid toolpath; the existing operation kept #7. A second
-pick reused #52 instead of adding another copy. The command dialog itself was
-not exercised.
+pick reused #52 instead of adding another copy. The user then checked the
+dialog on the same day in `Fusion Free Deburr - 3D Showcase`: picking that
+cloud tool through **Select tool...** created `Ball Deburr 4`; picking it from
+the cloud again, which failed before the fix, created `Ball Deburr 5`; and
+picking its `Document` entry created `Ball Deburr 6`. All three use the one
+document copy (#52) and generated valid toolpaths. A Deburr with the 6 mm ball
+after renumbering that document tool (#1 to #3) also worked.
