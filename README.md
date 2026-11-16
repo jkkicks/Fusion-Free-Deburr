@@ -32,6 +32,10 @@
 2. In Fusion, press **Shift+S** to open **Scripts and Add-Ins**, or find it under **Utilities > Add-Ins**.
 3. Click **+** beside **My Add-Ins**, select the extracted `FusionFreeDeburr` folder, and run the add-in.
 
+### Updates
+
+When Fusion starts, the add-in checks GitHub for a new version (at most once a day) and shows a window when one is out. In that window you can install it, skip it, or choose how updates work: **install automatically**, **ask me first** (the default) or **don't check automatically**, and pick the **stable** or **nightly** track. Updates install when you close Fusion, or straight away if you **Stop** and **Run** the add-in in Scripts and Add-Ins. Check by hand any time from **Utilities > Add-Ins > Check for Deburr Updates**. If an update fails to start, you're offered the previous version back. Versions up to v0.1.1 don't have the updater, so install the first version that has it by hand.
+
 Nightly builds of the latest changes are on the [Releases page](https://github.com/jkkicks/Fusion-Free-Deburr/releases), marked **Pre-release**. They are for testing; use the latest release for real work.
 
 ## Use

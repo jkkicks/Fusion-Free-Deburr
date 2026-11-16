@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #2f343c; --panel: #383d46; --hover: #48505c; --text: #e4e6ea; --muted: #9aa1ab;
+    --border: #4a515c; --accent: #2d8ce6; --ok: #6cc070; --warn: #f0b85a; --error: #ff8a80;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 12px "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  main { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; min-height: 0; overflow-y: auto; }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  .versions { color: var(--muted); }
+  .versions b { color: var(--text); font-weight: 600; }
+  #toggleNotes { display: inline-block; margin-top: 4px; }
+  #notes { flex: 1; min-height: 80px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border);
+           border-radius: 3px; padding: 8px 12px; line-height: 1.45; }
+  #notes h3 { margin: 8px 0 4px; font-size: 12px; font-weight: 600; }
+  #notes h3:first-child { margin-top: 0; }
+  #notes ul { margin: 0 0 6px; padding-left: 18px; }
+  #notes p { margin: 0 0 6px; }
+  .note { border-left: 3px solid var(--accent); background: var(--panel); padding: 7px 10px; border-radius: 0 3px 3px 0; }
+  .note.ok { border-color: var(--ok); }
+  .note.warn { border-color: var(--warn); }
+  .note.error { border-color: var(--error); color: var(--error); }
+  kbd { background: var(--hover); border-radius: 3px; padding: 0 4px; font: inherit; }
+  a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .actions .spacer { flex: 1; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+           border-radius: 3px; padding: 5px 14px; cursor: pointer; font: inherit; }
+  button:hover:not(:disabled) { background: var(--hover); }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  fieldset { border: 0; border-top: 1px solid var(--border); margin: 4px 0 0; padding: 10px 0 0; }
+  legend { padding: 0 6px 0 0; font-weight: 600; }
+  .option { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; cursor: pointer; }
+  .option input { margin: 2px 0 0; }
+  .option .hint { display: block; color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; padding: 6px 0 2px; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+           border-radius: 3px; padding: 4px 6px; font: inherit; outline: none; }
+  .muted { color: var(--muted); }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted);
+             border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite;
+             vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1 id="title">Fusion Free Deburr updates</h1>
+    <div class="versions" id="versions"></div>
+    <a id="toggleNotes" hidden></a>
+  </div>
+
+  <div id="notes" hidden></div>
+  <div class="note" id="message" hidden></div>
+
+  <div class="actions" id="actions"></div>
+
+  <fieldset>
+    <legend>When a new version is released</legend>
+    <label class="option">
+      <input type="radio" name="mode" value="auto">
+      <span>Install automatically
+        <span class="hint">Download it in the background and install it when Fusion closes.</span></span>
+    </label>
+    <label class="option">
+      <input type="radio" name="mode" value="notify">
+      <span>Ask me first (default)
+        <span class="hint">Show this window, and install only when I click Install.</span></span>
+    </label>
+    <label class="option">
+      <input type="radio" name="mode" value="off">
+      <span>Don't check automatically
+        <span class="hint">Check by hand from <b>Utilities &gt; Add-Ins &gt; Check for Deburr Updates</b>.</span></span>
+    </label>
+    <div class="row">
+      <span>Release track</span>
+      <select id="channel">
+        <option value="stable">Stable (recommended)</option>
+        <option value="nightly">Nightly (testing builds)</option>
+      </select>
+    </div>
+  </fieldset>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let state = null;
+  let showNotes = false;     // release notes stay collapsed until asked for
+  let notesVersion = null;
+
+  function send(action, data) {
+    return Promise.resolve(adsk.fusionSendData(action, JSON.stringify(data || {})))
+      .then((r) => { if (r) render(JSON.parse(r)); });
+  }
+
+  // Release notes are short Markdown from Release Drafter: headings, bullets, links.
+  function markdown(text) {
+    const inline = (s) => esc(s)
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/`(.+?)`/g, '<code>$1</code>')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    const out = [];
+    let list = false;
+    for (const raw of String(text).split(/\r?\n/)) {
+      const line = raw.trim();
+      const bullet = /^[-*] (.*)/.exec(line);
+      if (!bullet && list) { out.push('</ul>'); list = false; }
+      if (!line) continue;
+      if (bullet) {
+        if (!list) { out.push('<ul>'); list = true; }
+        out.push(`<li>${inline(bullet[1])}</li>`);
+      } else if (/^#+ /.test(line)) {
+        out.push(`<h3>${inline(line.replace(/^#+ /, ''))}</h3>`);
+      } else {
+        out.push(`<p>${inline(line)}</p>`);
+      }
+    }
+    if (list) out.push('</ul>');
+    return out.join('');
+  }
+
+  function button(label, action, primary, disabled) {
+    return `<button data-action="${action}" class="${primary ? 'primary' : ''}"${disabled ? ' disabled' : ''}>${esc(label)}</button>`;
+  }
+
+  function setMessage(html, kind) {
+    $('message').hidden = !html;
+    $('message').className = 'note ' + (kind || '');
+    $('message').innerHTML = html || '';
+  }
+
+  const howToInstallNow = 'It installs when you close Fusion. To install it now, press <kbd>Shift+S</kbd>, ' +
+    'select <b>FusionFreeDeburr</b> under Add-Ins, click <b>Stop</b>, then <b>Run</b>.';
+
+  function render(s) {
+    state = s;
+    const latest = s.latest;
+    const staged = s.staged;
+    let title, versions = `Installed: <b>v${esc(s.installed)}</b>`;
+    let actions = '';
+    setMessage('');
+
+    if (latest) versions += ` &nbsp;&rarr;&nbsp; Available: <b>v${esc(latest.version)}</b>` +
+      (latest.channel && latest.channel !== 'stable' ? ` <span class="muted">(${esc(latest.channel)})</span>` : '');
+
+    if (staged && s.rollback) {
+      title = 'Restore scheduled';
+      setMessage(`v${esc(staged)} will be restored. ${howToInstallNow}`, 'warn');
+      actions = button('Cancel restore', 'cancelStaged') + '<span class="spacer"></span>' + button('Close', 'later', true);
+    } else if (staged) {
+      title = 'Update ready to install';
+      setMessage(`v${esc(staged)} is downloaded and verified. ${howToInstallNow}`, 'ok');
+      actions = button('Cancel update', 'cancelStaged') + '<span class="spacer"></span>' + button('OK', 'later', true);
+    } else if (s.busy === 'downloading') {
+      title = 'Downloading update';
+      setMessage(`<span class="spinner"></span>Downloading and verifying v${esc(latest && latest.version)}&hellip;`);
+      actions = button('Hide', 'later');
+    } else if (latest) {
+      title = 'A new version is available';
+      if (s.blocker) {
+        setMessage(`${esc(s.blocker)} Download it from the release page and install it the usual way.`, 'warn');
+        actions = button('Open release page', 'openReleases', true);
+      } else {
+        actions = button(`Install v${latest.version}`, 'install', true);
+      }
+      actions += button('Remind me later', 'later') +
+        (s.skipped ? '<span class="muted">This version is skipped.</span>' : button('Skip this version', 'skip'));
+    } else if (s.busy === 'checking') {
+      title = 'Checking for updates';
+      setMessage('<span class="spinner"></span>Checking GitHub for a new version&hellip;');
+      actions = button('Close', 'later');
+    } else {
+      title = s.checked && !s.error ? "You're up to date" : 'Fusion Free Deburr updates';
+      actions = button('Check now', 'check', true) + button('Close', 'later');
+    }
+    if (s.error && !s.busy) setMessage(`${esc(s.error)}`, 'error');
+
+    $('title').textContent = title;
+    $('versions').innerHTML = versions;
+    $('actions').innerHTML = actions;
+
+    const notes = latest && !staged ? latest.notes : null;
+    if (!latest || latest.version !== notesVersion) showNotes = false;
+    notesVersion = latest && latest.version;
+    $('toggleNotes').hidden = !latest || !!staged;
+    $('toggleNotes').textContent = showNotes ? "Hide what's new" : "Show what's new";
+    $('notes').hidden = !latest || !!staged || !showNotes;
+    $('notes').innerHTML = (notes ? markdown(notes) : '<p class="muted">No release notes were loaded.</p>') +
+      (latest && latest.notesUrl ? '<p><a data-action="openNotes">Read the full release notes on GitHub</a></p>' : '');
+
+    for (const input of document.querySelectorAll('input[name=mode]')) input.checked = input.value === s.settings.mode;
+    $('channel').value = s.settings.channel;
+  }
+
+  $('toggleNotes').addEventListener('click', () => {
+    showNotes = !showNotes;
+    if (state) render(state);
+  });
+  document.addEventListener('click', (e) => {
+    const target = e.target.closest('[data-action]');
+    if (target && !target.disabled) send(target.dataset.action);
+  });
+  for (const input of document.querySelectorAll('input[name=mode]')) {
+    input.addEventListener('change', () => send('settings', {mode: input.value}));
+  }
+  $('channel').addEventListener('change', () => send('settings', {channel: $('channel').value}));
+
+  window.fusionJavaScriptHandler = {
+    handle(action, data) {
+      try {
+        if (action === 'state') render(JSON.parse(data));
+      } catch (e) {
+        setMessage('Error: ' + esc(e.message), 'error');
+      }
+      return 'OK';
+    },
+  };
+
+  (function waitForFusion() {
+    if (window.adsk && adsk.fusionSendData) send('ready');
+    else setTimeout(waitForFusion, 50);
+  })();
+})();
+</script>
+</body>
+</html>

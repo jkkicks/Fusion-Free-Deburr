@@ -92,56 +92,69 @@ A retry accepts identical existing draft assets, rejects mismatches and extra
 assets, and refuses any already published version. To change bytes, create a
 new version. Review/remove mismatched draft assets before retrying a failed build.
 
-## Updater channels
+## In-app updates
 
-`update.json` declares `channel: stable` or `channel: nightly`. Older `0.1.0-alpha.N`
-releases say `preview`; treat them as nightly. The future updater should:
+The add-in checks for updates itself (`FusionFreeDeburr/updater.py` for the
+logic, `updater_fusion.py` for Fusion, `resources/updater/index.html` for the
+window). Settings live outside the add-in folder, in
+`%LOCALAPPDATA%\FusionFreeDeburr\updater` on Windows and
+`~/Library/Application Support/FusionFreeDeburr/updater` on macOS.
 
-- **Keep the channel as a setting**, stored outside the runtime folders. Set it
-  from the channel of the build the user first installed, and let them change
-  it. Don't work it out from the running version: a nightly user who updates to
-  a stable release must stay on nightly.
-- **Stable:** download `https://github.com/jkkicks/Fusion-Free-Deburr/releases/latest/download/update.json`.
-  GitHub redirects that URL to the Latest release, which is always stable, so
-  nightlies can never reach stable users and no API call is needed.
-- **Nightly:** list releases through the GitHub API (paginate, skip drafts and
-  tags that are not `v`-prefixed SemVer), take the highest version across both
-  tracks, and use its `update.json`. Nightly users then get every nightly, plus
-  each stable release, because it outranks the nightlies before it.
-- **Compare versions by SemVer precedence**, as `version_key()` in
-  `tools/release.py` does. Only offer an update when its version is higher than
-  the running one. Checking once a day is enough, because nightlies come out at
-  most once a day.
+- **Modes:** *Install automatically*, *Ask me first* (default) and *Don't check
+  automatically*. All are in the update window, which opens when an update is
+  found or from **Utilities > Add-Ins > Check for Deburr Updates**. Automatic
+  checks run about 20 seconds after start, at most once every 20 hours.
+- **Channels:** stable reads
+  `https://github.com/jkkicks/Fusion-Free-Deburr/releases/latest/download/update.json`,
+  so nightlies never reach stable users. Nightly lists releases through the
+  GitHub API (paginated, skipping drafts and tags that are not `v`-prefixed
+  SemVer) and takes the highest version across both tracks. The channel is set
+  from the first installed build (nightly only if that was a `-nightly.N`
+  build, otherwise stable) and afterwards only by the user.
+- **Versions** compare by SemVer precedence; `version_key()` in `updater.py`
+  must agree with `tools/release.py`, and a test checks it.
+- **Verification:** HTTPS from GitHub hosts only, `update.json` must name this
+  add-in ID and an asset under this repository's release download path, and the
+  ZIP must match its size and SHA-256. The ZIP is refused if it has unsafe
+  paths, links, an unexpected layout, or a manifest with another ID or version.
+- **Installing:** the verified add-in folder is staged outside the add-in. Its
+  files replace the add-in's files when the add-in stops: when Fusion closes,
+  or on Stop in Scripts and Add-Ins. A staged update older than or equal to
+  what is in the folder (for example after a manual install) is discarded,
+  never installed. Each file is written, flushed and renamed into place. If any
+  fails, the old files are put back and the update is retried at the next
+  stop, up to three times, and the error shows in the update window. Only files
+  a previous update installed are ever deleted.
+- **Interrupted installs:** an install journal in `state.json` records what is
+  being copied. If Fusion is killed part-way, the next start finishes the
+  install before importing any toolpath module, and keeps Deburr off for that
+  session, so old and new modules never run together.
+- **Rollback:** the replaced files are kept. If the new version fails to start
+  (including failing to import), the user is asked whether to restore the
+  previous version, which is then installed at the next stop and the failed
+  version is skipped.
+- **Not updated automatically:** a git checkout (a `.git` folder in or beside
+  the add-in folder), a read-only folder, and releases whose `update.json` says
+  `installation_mode: manual`, needs a newer `minimum_loader_version` than
+  `UPDATER_VERSION`, or doesn't list the user's OS. These get the window with a
+  link to the release page instead, except git checkouts, which only log it
+  (the window still explains it on a manual check).
 
-## Update contract and remaining implementation
+`tools/release.py` writes `installation_mode: automatic` and
+`minimum_loader_version: 1`. Raise `minimum_loader_version` together with
+`UPDATER_VERSION` if a release ever can't be installed by older updaters.
+Releases up to v0.1.1 have no updater and say `manual`, so users install the
+first updater-enabled release by hand once.
 
-The ZIP is the single installation payload. `update.json` schema 1 records the
-app ID, version, channel, source SHA, supported OSes (from the manifest), release notes URL, payload
-URL, byte size and SHA-256. The source manifest remains a development baseline;
-the manifest inside each release ZIP contains the release's exact version.
-
-The desired default is automatic download and activation on the next Fusion
-start. This branch currently establishes release infrastructure, not an active
-in-app updater: metadata explicitly declares `installation_mode: manual` until
-the loader is implemented and tested. Existing installations need one manual
-installation of that future loader-enabled release.
-
-Updater work is deferred until the GitHub pipeline produces a real release
-package. A local prototype is preserved separately from this release branch.
-Next integrate a production stable loader, side-by-side runtimes outside Fusion's add-in
-discovery folder, settings outside runtime folders, atomic pending/current state,
-safe archive validation, compatibility checks and failed-start rollback. Nightly
-discovery follows the channel rules above. Developer checkouts must stay notification-only. Network work must run
-off Fusion's UI thread; activation happens before importing runtime modules.
-Verify metadata signatures before enabling automatic installation. A checksum
-alone does not independently establish publisher identity.
-
-Fusion testing is needed for registration, restart activation, offline use and
-rollback after failed startup. Hosted CI does not run Fusion or verify CAM output.
-During beta, main should only receive changes that have been tested in Fusion.
-The user has smoke-tested the local `0.1.0-test.1` installation ZIP: it activated
-and generated a toolpath successfully. The development add-in was restored afterward.
-Hosted Actions and publication still need validation on GitHub.
+Not covered: `update.json` is not signed, so automatic installs trust GitHub
+and this repository's release process (the same trust as downloading a release
+by hand). A broken `updater.py`, `updater_fusion.py` or entry point can't roll
+itself back; the user then reinstalls by hand. Fusion testing is still needed
+for: install on Fusion exit, install on Stop/Run, the rollback prompt
+(including whether Fusion calls `stop()` after a failed `run()`), whether
+Fusion keeps add-in files open during `stop()` on Windows, macOS (certificate
+handling in Fusion's Python) and offline use. Checks only run when the add-in
+starts, so a Fusion session left open for days is not re-checked.
 
 References: [Release Drafter v6.1.0](https://github.com/release-drafter/release-drafter/tree/v6.1.0),
 [GitHub workflow triggers](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).

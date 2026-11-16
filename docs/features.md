@@ -47,6 +47,7 @@ types, such as flat endmills and multi-tooth thread mills, are rejected.
 | CI on Windows and Linux; label check on pull requests | `.github/workflows/ci.yml` |
 | Release notes drafted on every merge, nightly prereleases, and approval-gated stable releases | `.github/workflows/release-drafter.yml`, `release.yml`, `tools/release.py`, [releases.md](releases.md) |
 | Installation ZIP | `tools/package.py` |
+| In-app updates: check, notify or install automatically, stable or nightly track, rollback after a failed start | `FusionFreeDeburr/updater.py`, `updater_fusion.py`, `resources/updater/index.html`, [releases.md](releases.md#in-app-updates) |
 | Diagnostic post processor that exports Trace moves as CSV (not machine code) | `tools/dump_toolpath.cps` |
 
 ## In review
@@ -57,9 +58,6 @@ types, such as flat endmills and multi-tooth thread mills, are rejected.
 
 ## Not built yet
 
-- **In-app automatic updates.** Releases publish the files an updater would
-  need, but installing an update is still manual. See [releases.md](releases.md)
-  for the plan.
 - **Repositioned manufacturing models** and non-solid setup selections are
   rejected.
 - **Simulating remaining stock.** Checks use the finished model, so always

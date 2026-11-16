@@ -88,8 +88,10 @@ def build_assets(root, version, source_sha, repository):
         'source_sha': source_sha, 'addin_id': manifest['id'],
         # Must agree with what Fusion is told in the packaged manifest.
         'supported_os': packed['supportedOS'].split('|'),
-        # No loader exists in legacy installations. They must install manually once.
-        'installation_mode': 'manual', 'minimum_loader_version': 1,
+        # The in-app updater (FusionFreeDeburr/updater.py) installs "automatic"
+        # releases whose minimum_loader_version is at most its UPDATER_VERSION.
+        # Raise it when an update can't be installed by older updaters.
+        'installation_mode': 'automatic', 'minimum_loader_version': 1,
         'release_notes_url': release_url,
         'asset': {'name': payload.name, 'size': len(data), 'sha256': digest(data),
                   'url': f'https://github.com/{repository}/releases/download/v{version}/{payload.name}'},

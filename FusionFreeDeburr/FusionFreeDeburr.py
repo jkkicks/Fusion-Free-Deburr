@@ -1,6 +1,7 @@
 """Fusion Free Deburr - Fusion add-in entry point.
 
 Registers the Deburr button; the command itself lives in ball_deburr_command.py.
+In-app updates live in updater.py and updater_fusion.py.
 """
 
 import importlib
@@ -11,12 +12,37 @@ import adsk.core
 import adsk.fusion
 import adsk.cam
 
-from . import deburr_math, deburr_chain, deburr_fusion, cutter_profile, lollipop_fusion, cam_tools, tool_picker, ball_deburr_command
+# The updater loads first and on its own, so a broken update can still be
+# reported, rolled back or replaced by a newer one.
+from . import updater, updater_fusion
 
 # Stop/Run in Fusion doesn't re-import submodules; reload so edits take effect.
 # Order matters: dependencies before the modules that import them.
-for _module in (deburr_math, deburr_chain, deburr_fusion, cutter_profile, lollipop_fusion, cam_tools, tool_picker, ball_deburr_command):
+for _module in (updater, updater_fusion):
     importlib.reload(_module)
+
+# If Fusion was killed part-way through installing an update, finish it now,
+# before any toolpath module is imported, so old and new code never mix.
+_import_error = None
+_blocked = None  # set when Deburr must stay off this session
+try:
+    _resumed = updater.resume_interrupted(updater.Store(updater.data_dir()), os.path.dirname(os.path.abspath(__file__)))
+    if _resumed:
+        _blocked = (f'Finished installing v{_resumed}, which was interrupted. '
+                         'Stop and Run the add-in in Scripts and Add-Ins (Shift+S), or restart Fusion, to load it.')
+except Exception:
+    _blocked = ('An interrupted update could not be finished, so Deburr is turned off to avoid mixing '
+                     'versions. Reinstall the add-in from the release page.\n\n' + traceback.format_exc())
+
+try:
+    if _blocked:
+        raise ImportError(_blocked)
+    from . import deburr_math, deburr_chain, deburr_fusion, cutter_profile, lollipop_fusion, cam_tools, tool_picker, ball_deburr_command
+    for _module in (deburr_math, deburr_chain, deburr_fusion, cutter_profile, lollipop_fusion, cam_tools, tool_picker, ball_deburr_command):
+        importlib.reload(_module)
+except Exception:
+    if not _blocked:
+        _import_error = traceback.format_exc()
 
 CMD_ID = 'additionalToolpaths_ballDeburr'
 CMD_NAME = 'Deburr'
@@ -112,6 +138,15 @@ def run(context):
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
+        try:
+            updater_fusion.start(_app, _ui, log, _handlers)
+        except Exception:
+            log(f'Updater failed to start:\n{traceback.format_exc()}')
+        if _blocked:
+            _ui.messageBox(_blocked, 'Fusion Free Deburr')
+            return
+        if _import_error:
+            raise ImportError(_import_error)
         ball_deburr_command.init(_app, _ui, log, _handlers)
         tool_picker.start(_app, _ui, log, _handlers)
 
@@ -146,14 +181,20 @@ def run(context):
             control = panel.controls.addCommand(cmd_def)
             control.isPromoted = panel.id in PROMOTE_IN_PANELS
 
+        # Only now is a freshly installed update known to work; until then a
+        # failed start offers to restore the previous version.
+        updater_fusion.started()
         log(f'Started; button added to panel "{panel.id}"')
     except:
-        if _ui:
-            _ui.messageBox(f'FusionFreeDeburr failed to start:\n{traceback.format_exc()}')
+        error = traceback.format_exc()
+        if _ui and not updater_fusion.offer_rollback(error):
+            _ui.messageBox(f'FusionFreeDeburr failed to start:\n{error}')
 
 
 def stop(context):
     try:
+        if _import_error or _blocked:
+            return
         ball_deburr_command.stop()
         for ws_id, panel_id in PANEL_CANDIDATES:
             ws = _ui.workspaces.itemById(ws_id)
@@ -178,3 +219,8 @@ def stop(context):
     except:
         if _ui:
             _ui.messageBox(f'FusionFreeDeburr failed to stop:\n{traceback.format_exc()}')
+    finally:
+        # Last, once nothing of the old version is running: installs a
+        # downloaded update. Runs on Stop and when Fusion closes.
+        updater_fusion.stop()
+        _handlers.clear()
