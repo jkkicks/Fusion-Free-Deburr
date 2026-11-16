@@ -138,7 +138,7 @@ alone does not independently establish publisher identity.
 
 Fusion testing is needed for registration, restart activation, offline use and
 rollback after failed startup. Hosted CI does not run Fusion or verify CAM output.
-During alpha, main should only receive changes that have been tested in Fusion.
+During beta, main should only receive changes that have been tested in Fusion.
 The user has smoke-tested the local `0.1.0-test.1` installation ZIP: it activated
 and generated a toolpath successfully. The development add-in was restored afterward.
 Hosted Actions and publication still need validation on GitHub.

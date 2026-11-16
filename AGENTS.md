@@ -100,7 +100,7 @@ python -m compileall -q FusionFreeDeburr tools
 ```
 
 Add or update unit tests for new geometry and logic. The tests use mocks; they
-don't run Fusion. During alpha, a change only goes into `main` after someone
+don't run Fusion. During beta, a change only goes into `main` after someone
 has tried it in Fusion, so ask the user to do that and give them a short
 checklist of exactly what to try:
 

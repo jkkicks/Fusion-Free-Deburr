@@ -25,7 +25,7 @@ body:
     attributes:
       label: Versions
       description: Add-in version, Fusion version, and Windows or macOS.
-      placeholder: 0.1.0-alpha, Fusion 2706.1.17, macOS
+      placeholder: 0.1.0, Fusion 2706.1.17, macOS
     validations:
       required: true
   - type: textarea
