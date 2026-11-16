@@ -275,4 +275,5 @@ cloud tool through **Select tool...** created `Ball Deburr 4`; picking it from
 the cloud again, which failed before the fix, created `Ball Deburr 5`; and
 picking its `Document` entry created `Ball Deburr 6`. All three use the one
 document copy (#52) and generated valid toolpaths. A Deburr with the 6 mm ball
-after renumbering that document tool (#1 to #3) also worked.
+after renumbering that document tool (#1 to #3) also worked, as did editing an
+existing Deburr operation with `Edit Deburr` and switching it to a library tool.
