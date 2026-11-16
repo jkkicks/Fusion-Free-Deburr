@@ -197,11 +197,22 @@ class CommandJobTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, 'neck diameter'):
             cmd.cam_tools.tool_from_json(json.dumps(raw))
 
-    def test_changed_document_tool_is_not_silently_reimported(self):
-        tool = NS(toJson=lambda: json.dumps({'guid': 'tool-id', 'geometry': {'DC': 10}}))
-        job = NS(keep_current_tool=False,
-                 tool_json=json.dumps({'guid': 'tool-id', 'geometry': {'DC': 8}}))
+    def test_library_version_of_an_edited_document_tool_is_imported(self):
+        # Issue #9: the document copy of a library tool was edited (here its
+        # tool number), so picking the library version again must import that
+        # version rather than fail or silently use the edited document copy.
+        edited = NS(toJson=lambda: json.dumps({'guid': 'tool-id', 'post-process': {'number': 7}}))
+        raw = json.dumps({'guid': 'tool-id', 'post-process': {'number': 52}})
+        job = NS(keep_current_tool=False, tool_json=raw)
         with patch.object(adsk.cam.Tool, 'createFromJson') as create:
-            with self.assertRaisesRegex(dm.DeburrError, 'selected tool changed'):
-                cmd._job_tool(NS(documentToolLibrary=[tool]), job)
+            self.assertIs(cmd._job_tool(NS(documentToolLibrary=[edited]), job), create.return_value)
+            create.assert_called_once_with(raw)
+
+    def test_identical_copy_is_reused_beside_an_edited_one_with_the_same_guid(self):
+        edited = NS(toJson=lambda: json.dumps({'guid': 'tool-id', 'post-process': {'number': 7}}))
+        raw = {'guid': 'tool-id', 'post-process': {'number': 52}}
+        same = NS(toJson=lambda: json.dumps(raw))
+        job = NS(keep_current_tool=False, tool_json=json.dumps(raw))
+        with patch.object(adsk.cam.Tool, 'createFromJson') as create:
+            self.assertIs(cmd._job_tool(NS(documentToolLibrary=[edited, same]), job), same)
             create.assert_not_called()

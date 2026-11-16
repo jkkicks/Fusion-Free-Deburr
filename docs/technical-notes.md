@@ -257,3 +257,17 @@ creating a new lollipop operation in `Deburr New` with the four front side-pocke
 rim edges, the 35 mm-reach tool, and 0.2 mm width; reopening it with `Edit Deburr`
 and confirming the edges, tool, and width before canceling; and editing
 `Ball Deburr - Kidney Pocket` without changes and regenerating successfully.
+
+Library tool picks (issue #9, 2026-11-15): `Tool.createFromJson` does not keep
+every tool exactly as given. A cloud 3/8 in ball endmill lost its `expressions`
+block and had its holder gauge length recomputed on import, and editing a
+document tool (for example its number) changes its copy the same way. The
+document copy then shares the library tool's GUID but not its definition, and
+picking the library tool again failed with "The selected tool changed".
+Deburr now reuses a document tool only when it is identical and otherwise
+imports the selected definition. Through the API in Fusion 2706.1.17 (macOS), in
+an unsaved scratch document holding an edited copy (#7) of that cloud tool, the
+apply step created a `Ball Deburr` on four top edges at 0.020 in with the cloud
+definition (#52) and a valid toolpath; the existing operation kept #7. A second
+pick reused #52 instead of adding another copy. The command dialog itself was
+not exercised.

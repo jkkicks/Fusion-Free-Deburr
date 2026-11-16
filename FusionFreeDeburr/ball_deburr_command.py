@@ -397,23 +397,15 @@ def _job_tool(cam, job):
     if job.keep_current_tool:
         return job.operation.tool
     snapshot = json.loads(job.tool_json)
-    matching_guid = False
     for tool in cam.documentToolLibrary:
-        current = json.loads(tool.toJson())
-        if not snapshot.get('guid'):
-            # Without a GUID only an identical document tool is the same tool.
-            if current == snapshot:
-                return tool
-            continue
-        if current.get('guid') != snapshot.get('guid'):
-            continue
-        matching_guid = True
-        if current == snapshot:
+        if json.loads(tool.toJson()) == snapshot:
             # Preserve Fusion's internal document-tool ID. Reimporting JSON
             # does not preserve that ID, even if its public GUID is unchanged.
             return tool
-    if matching_guid:
-        raise dm.DeburrError('The selected tool changed; run Deburr again to use its current definition.')
+    # A library tool, or a library version of a tool whose document copy has
+    # since been edited (same GUID, different definition). Import exactly what
+    # was selected; Fusion keeps it as a separate document tool and leaves the
+    # other operations on their own copy.
     return cam_tools.tool_from_json(job.tool_json)
 
 
