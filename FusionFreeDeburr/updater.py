@@ -544,7 +544,7 @@ def apply_staged(store, addin_dir):
     addin_dir = Path(addin_dir)
     state = store.state()
     if state.get('installing'):
-        return _finish(store, addin_dir, state, state['installing'])
+        return _resume(store, addin_dir, state, state['installing'])
     version = state.get('staged')
     if not version or folder_blocker(addin_dir):
         return None
@@ -570,8 +570,8 @@ def apply_staged(store, addin_dir):
     shutil.rmtree(pending, ignore_errors=True)
     _copy_into(addin_dir, old_files, pending)
     journal = {
-        'version': version, 'kind': kind, 'previous': current,
-        'files': new_files, 'old_files': old_files,
+        'version': version, 'kind': kind, 'previous': current, 'addin_dir': str(addin_dir),
+        'files': new_files, 'old_files': old_files, 'attempts': 0,
         # Only delete files a previous update installed; never the user's own.
         'remove': sorted(set(installed) - set(new_files)),
         'tracked': (state.get('staged_tracked') or []) if kind == 'rollback' else new_files,
@@ -580,6 +580,38 @@ def apply_staged(store, addin_dir):
     state['installing'] = journal
     store.save_state(state)
     return _finish(store, addin_dir, state, journal)
+
+
+def _resume(store, addin_dir, state, journal):
+    """Finish an interrupted install, unless the folder has changed since."""
+    current = (read_manifest(addin_dir) or {}).get('version')
+    if journal.get('addin_dir') != str(addin_dir) or current not in (journal['previous'], journal['version']):
+        # Installed by hand (or moved) since: never overwrite that with the staged files.
+        _abandon(store, state)
+        return None
+    journal['attempts'] = int(journal.get('attempts') or 0) + 1
+    store.save_state(state)
+    if journal['attempts'] > MAX_INSTALL_FAILURES:
+        # Give up, but keep Deburr off until the folder changes (a reinstall),
+        # because it may still hold a mix of two versions.
+        _abandon(store, state, blocked=_fingerprint(addin_dir))
+        raise UpdateError(f'Installing v{journal["version"]} could not be finished')
+    return _finish(store, addin_dir, state, journal)
+
+
+def _abandon(store, state, blocked=None):
+    state.update(installing=None, blocked=blocked)
+    store.save_state(state)
+    store.discard_staged()
+    shutil.rmtree(store.root / PENDING_BACKUP, ignore_errors=True)
+
+
+def _fingerprint(addin_dir):
+    digest = hashlib.sha256()
+    for relative in _files(addin_dir):
+        digest.update(relative.encode() + b'\0')
+        digest.update(Path(addin_dir).joinpath(*relative.split('/')).read_bytes())
+    return digest.hexdigest()
 
 
 def _finish(store, addin_dir, state, journal):
@@ -608,6 +640,10 @@ def _finish(store, addin_dir, state, journal):
 
 def _swap_backup(pending, backup):
     old = backup.with_name(backup.name + '-old')
+    if not pending.exists():
+        # A run killed before saving the state already swapped it in.
+        shutil.rmtree(old, ignore_errors=True)
+        return
     shutil.rmtree(old, ignore_errors=True)
     if backup.exists():
         os.replace(backup, old)
@@ -650,7 +686,14 @@ def _restore(store, addin_dir, state, journal, error):
 def resume_interrupted(store, addin_dir):
     """At startup, before importing the add-in's modules: finish an install that
     Fusion was killed in the middle of, so old and new modules never mix.
-    Returns the version installed, or None."""
-    if not store.state().get('installing'):
+    Returns the version installed, or None. Raises UpdateError while the folder
+    may still hold a mix of two versions."""
+    state = store.state()
+    if state.get('blocked'):
+        if state['blocked'] == _fingerprint(addin_dir):
+            raise UpdateError('An interrupted update could not be finished')
+        state['blocked'] = None  # reinstalled since
+        store.save_state(state)
+    if not state.get('installing'):
         return None
     return apply_staged(store, addin_dir)

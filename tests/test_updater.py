@@ -410,5 +410,67 @@ class ReviewRegressionTests(Workspace):
             updater.check_metadata(bad)
 
 
+
+class InterruptedInstallTests(Workspace):
+    """An install journal left by Fusion being killed part-way."""
+
+    def interrupt(self, version='0.2.0', at='module.py'):
+        self.stage(version)
+        real_replace = os.replace
+
+        def killed(src, dst):
+            if str(dst).endswith(at):
+                raise SystemExit('Fusion killed')
+            return real_replace(src, dst)
+
+        with patch.object(updater.os, 'replace', side_effect=killed), self.assertRaises(SystemExit):
+            updater.apply_staged(self.store, self.addin)
+        self.assertTrue(self.store.state().get('installing'))
+
+    def test_hand_install_since_is_not_overwritten(self):
+        self.interrupt()
+        (self.addin / 'FusionFreeDeburr.manifest').write_text(manifest('0.3.0'))
+        (self.addin / 'FusionFreeDeburr.py').write_text("VERSION = '0.3.0'\n")
+        self.assertIsNone(updater.resume_interrupted(self.store, self.addin))
+        self.assertEqual(self.text('FusionFreeDeburr.py'), "VERSION = '0.3.0'\n")
+        state = self.store.state()
+        self.assertFalse(state.get('installing'))
+        self.assertIsNone(state.get('staged'))
+
+    def test_killed_after_backup_swap_resumes_and_keeps_backup(self):
+        self.stage('0.2.0')
+        updater.apply_staged(self.store, self.addin)
+        self.store.mark_started()
+        self.stage('0.3.0')
+        real_swap = updater._swap_backup
+
+        def swap_then_killed(pending, backup):
+            real_swap(pending, backup)
+            raise SystemExit('Fusion killed before the state was saved')
+
+        with patch.object(updater, '_swap_backup', swap_then_killed), self.assertRaises(SystemExit):
+            updater.apply_staged(self.store, self.addin)
+        for start in range(2):  # resume, then a normal start
+            updater.resume_interrupted(self.store, self.addin)
+        self.assertEqual(json.loads(self.text('FusionFreeDeburr.manifest'))['version'], '0.3.0')
+        self.assertEqual(updater.read_manifest(self.store.backup_dir)['version'], '0.2.0')
+        self.assertFalse(self.store.state().get('installing'))
+        self.assertEqual(self.store.rollback_candidate(), ('0.3.0', '0.2.0'))
+
+    def test_unfinishable_install_blocks_until_reinstalled(self):
+        self.interrupt()
+        shutil.rmtree(self.store.staged_dir)
+        shutil.rmtree(self.store.root / updater.PENDING_BACKUP)
+        for attempt in range(updater.MAX_INSTALL_FAILURES + 1):
+            with self.assertRaises(Exception):
+                updater.resume_interrupted(self.store, self.addin)
+        self.assertFalse(self.store.state().get('installing'))
+        with self.assertRaises(updater.UpdateError):  # still blocked: nothing changed
+            updater.resume_interrupted(self.store, self.addin)
+        (self.addin / 'module.py').write_text('x = 1\n')  # reinstalled by hand
+        self.assertIsNone(updater.resume_interrupted(self.store, self.addin))
+        self.assertIsNone(updater.resume_interrupted(self.store, self.addin))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -128,7 +128,10 @@ window). Settings live outside the add-in folder, in
 - **Interrupted installs:** an install journal in `state.json` records what is
   being copied. If Fusion is killed part-way, the next start finishes the
   install before importing any toolpath module, and keeps Deburr off for that
-  session, so old and new modules never run together.
+  session, so old and new modules never run together. If the folder was
+  changed by hand since, the journal is dropped instead of overwriting it. If
+  the install still can't be finished after three starts, Deburr stays off
+  until the add-in is reinstalled by hand.
 - **Rollback:** the replaced files are kept. If the new version fails to start
   (including failing to import), the user is asked whether to restore the
   previous version, which is then installed at the next stop and the failed
