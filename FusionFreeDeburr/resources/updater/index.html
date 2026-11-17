@@ -140,8 +140,6 @@
     $('message').innerHTML = html || '';
   }
 
-  const howToInstallNow = 'It installs when you close Fusion. To install it now, press <kbd>Shift+S</kbd>, ' +
-    'select <b>FusionFreeDeburr</b> under Add-Ins, click <b>Stop</b>, then <b>Run</b>.';
 
   function render(s) {
     state = s;
@@ -156,11 +154,11 @@
 
     if (staged && s.rollback) {
       title = 'Restore scheduled';
-      setMessage(`v${esc(staged)} will be restored. ${howToInstallNow}`, 'warn');
+      setMessage(`v${esc(staged)} will be restored the next time you restart Fusion.`, 'warn');
       actions = button('Cancel restore', 'cancelStaged') + '<span class="spacer"></span>' + button('Close', 'later', true);
     } else if (staged) {
       title = 'Update ready to install';
-      setMessage(`v${esc(staged)} is downloaded and verified. ${howToInstallNow}`, 'ok');
+      setMessage(`v${esc(staged)} is downloaded and will be installed the next time you restart Fusion.`, 'ok');
       actions = button('Cancel update', 'cancelStaged') + '<span class="spacer"></span>' + button('OK', 'later', true);
     } else if (s.busy === 'downloading') {
       title = 'Downloading update';

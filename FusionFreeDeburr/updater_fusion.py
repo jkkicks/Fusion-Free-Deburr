@@ -98,8 +98,7 @@ def offer_rollback(error_text):
         failed, previous = candidate
         answer = _ui.messageBox(
             f'Fusion Free Deburr v{failed} failed to start:\n\n{error_text}\n\n'
-            f'Restore the previous version, v{previous}? It is put back when you close Fusion, '
-            'or when you Stop and Run the add-in in Scripts and Add-Ins (Shift+S).',
+            f'Restore the previous version, v{previous}? It is put back the next time you restart Fusion.',
             'Fusion Free Deburr', adsk.core.MessageBoxButtonTypes.YesNoButtonType,
             adsk.core.MessageBoxIconTypes.WarningIconType)
         if answer == adsk.core.DialogResults.DialogYes:

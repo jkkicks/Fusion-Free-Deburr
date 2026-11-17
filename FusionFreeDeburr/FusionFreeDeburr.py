@@ -29,7 +29,7 @@ try:
     _resumed = updater.resume_interrupted(updater.Store(updater.data_dir()), os.path.dirname(os.path.abspath(__file__)))
     if _resumed:
         _blocked = (f'Finished installing v{_resumed}, which was interrupted. '
-                         'Stop and Run the add-in in Scripts and Add-Ins (Shift+S), or restart Fusion, to load it.')
+                         'Restart Fusion to use it.')
 except Exception:
     _blocked = ('An interrupted update could not be finished, so Deburr is turned off to avoid mixing '
                      'versions. Reinstall the add-in from the release page.\n\n' + traceback.format_exc())
