@@ -118,6 +118,24 @@ def dist(a, b):
     return math.sqrt(dm.dot(d, d))
 
 
+# Points sampled along an edge for its saved shape, both ends included. Start,
+# middle and end alone cannot tell apart two same-radius circles in
+# perpendicular planes that share those points; the points between do.
+EDGE_SHAPE_POINTS = 9
+
+
+def same_edge_shape(a, b, tol):
+    """Whether two edge shapes [length, point, ...] describe the same edge, in
+    either direction. A shape with any other number of points never matches."""
+    size = 1 + EDGE_SHAPE_POINTS
+    if not a or not b or len(a) != size or len(b) != size:
+        return False
+    if abs(a[0] - b[0]) > tol:
+        return False
+    return any(all(dist(p, q) <= tol for p, q in zip(a[1:], points))
+               for points in (b[1:], b[:0:-1]))
+
+
 def _plane_basis(axis):
     """Two unit vectors spanning the plane perpendicular to axis."""
     z = dm.normalize(axis)

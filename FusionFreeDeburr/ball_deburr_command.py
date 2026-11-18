@@ -53,6 +53,9 @@ class DeburrJob:
     width: float
     tool_json: str
     keep_current_tool: bool
+    # The picked edges themselves. A token cannot always be turned back into
+    # its edge (linked components, manufacturing models); these still can.
+    edges: tuple = ()
 
 
 def init(app, ui, log, handlers):
@@ -218,8 +221,20 @@ def _load_edges(inputs: adsk.core.CommandInputs):
     if not settings:
         return
     missing = 0
-    for token in settings['edges']:
-        edge = deburr_fusion.find_by_token(s.design, token, adsk.fusion.BRepEdge.cast)
+    candidates = []
+
+    def model_edges():
+        # Read once, and only if a token fails to resolve.
+        if not candidates:
+            candidates.extend(deburr_fusion.setup_model_edges(s.edit_op.parentSetup))
+        return candidates
+    tokens = settings['edges']
+    shapes = settings.get('edge_shapes') or []
+    for i, token in enumerate(tokens):
+        shape = shapes[i] if i < len(shapes) else None
+        edge = deburr_fusion.find_edge(
+            s.design, token, shape, model_edges,
+            lambda: deburr_fusion.manufacturing_model_designs(s.design))
         if not (edge and sel.addSelection(edge)):
             missing += 1
     if missing:
@@ -390,7 +405,7 @@ def _capture_job(inputs: adsk.core.CommandInputs, session):
 
     return DeburrJob(s.document, setup, op,
                      tuple(edge.entityToken for edge in edges), width,
-                     tool.toJson(), bool(op and is_current_tool))
+                     tool.toJson(), bool(op and is_current_tool), tuple(edges))
 
 
 def _job_tool(cam, job):
@@ -409,6 +424,22 @@ def _job_tool(cam, job):
     return cam_tools.tool_from_json(job.tool_json)
 
 
+def _job_edges(design, job):
+    """The job's edges: by token, else the picked edge if it is still valid.
+
+    Design.findEntityByToken does not resolve edges of linked (external
+    reference) components or manufacturing models."""
+    edges = []
+    for i, token in enumerate(job.edge_tokens):
+        edge = deburr_fusion.find_by_token(design, token, adsk.fusion.BRepEdge.cast)
+        if edge is None and i < len(job.edges) and job.edges[i].isValid:
+            edge = job.edges[i]
+        if edge is None:
+            raise dm.DeburrError('A selected edge no longer exists; reselect the edges.')
+        edges.append(edge)
+    return edges
+
+
 def _apply_job(job):
     """Apply accepted input after the dialog's transaction has committed."""
     if not job.document.isValid or _app.activeDocument != job.document:
@@ -417,10 +448,7 @@ def _apply_job(job):
         raise dm.DeburrError('The selected setup or operation no longer exists.')
     design = adsk.fusion.Design.cast(job.document.products.itemByProductType('DesignProductType'))
     cam = adsk.cam.CAM.cast(job.document.products.itemByProductType('CAMProductType'))
-    edges = [deburr_fusion.find_by_token(design, token, adsk.fusion.BRepEdge.cast)
-             for token in job.edge_tokens]
-    if any(edge is None for edge in edges):
-        raise dm.DeburrError('A selected edge no longer exists; reselect the edges.')
+    edges = _job_edges(design, job)
     op, setup, width = job.operation, job.setup, job.width
     if op and op.parentSetup != setup:
         raise dm.DeburrError('The operation moved to another setup; run Deburr again.')

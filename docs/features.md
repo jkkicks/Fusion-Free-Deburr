@@ -31,6 +31,7 @@ feature updates it.
 | Approach and withdrawal moves outside the part; back-side chamfer cuts step toward the tool axis, then move along it | `lollipop_fusion.py` (`add_access`, `_retreat_finder`) |
 | Reuses an identical document tool without a GUID instead of importing a copy | `ball_deburr_command.py` |
 | Settings saved on the operation so it can be edited later; failed edits roll back | `deburr_fusion.py` (`save_settings`, `load_settings`, `update_operation`) |
+| Edges of linked components and manufacturing models: used as picked, and found again when editing by token in the body's own design plus shape | `ball_deburr_command.py` (`_job_edges`), `deburr_fusion.py` (`find_edge`, `edge_shape`) |
 | Updates run after the dialog closes, so Fusion's undo and commands stay stable | `ball_deburr_command.py` (`DeburrJob`) |
 | Windows and macOS | `FusionFreeDeburr/FusionFreeDeburr.manifest` (`supportedOS`) |
 | Toolbar icons | `tools/make_icons.py` generates `resources/BallDeburr/` |

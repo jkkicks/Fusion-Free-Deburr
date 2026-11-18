@@ -385,6 +385,9 @@ def save_settings(op: adsk.cam.Operation, edges, width, sketch):
     data = {
         'version': 1,
         'edges': [e.entityToken for e in edges],
+        # Optional, one per edge: finds the edge again when its token cannot
+        # be resolved (linked components, manufacturing models).
+        'edge_shapes': [edge_shape(e) for e in edges],
         'width': width,
         'sketch': sketch.entityToken,
     }
@@ -402,6 +405,131 @@ def find_by_token(design: adsk.fusion.Design, token, cast):
         if typed:
             return typed
     return None
+
+
+def edge_shape(edge: adsk.fusion.BRepEdge):
+    """[length, point, ...] of an edge in model space, or None: its length and
+    dc.EDGE_SHAPE_POINTS points evenly spaced in parameter, start to end."""
+    ev = edge.evaluator
+    ok, t0, t1 = ev.getParameterExtents()
+    if not ok:
+        return None
+    points = []
+    last = dc.EDGE_SHAPE_POINTS - 1
+    for i in range(last + 1):
+        ok, p = ev.getPointAtParameter(t0 + (t1 - t0) * i / last)
+        if not ok:
+            return None
+        points.append(list(_tup(p)))
+    return [edge.length] + points
+
+
+def setup_model_edges(setup: adsk.cam.Setup):
+    """Every edge of the setup's model bodies, as CAM presents them."""
+    def bodies(entities):
+        result = []
+        for entity in entities:
+            body = adsk.fusion.BRepBody.cast(entity)
+            occurrence = adsk.fusion.Occurrence.cast(entity)
+            if body:
+                result.append(body)
+            elif occurrence:
+                result.extend(bodies(occurrence.bRepBodies))
+                result.extend(bodies(occurrence.childOccurrences))
+        return result
+    return [edge for body in bodies(setup.models) for edge in body.edges]
+
+
+def _occurrence_path(entity):
+    context = entity.assemblyContext
+    return context.fullPathName if context else ''
+
+
+def manufacturing_model_designs(design: adsk.fusion.Design):
+    """The own design of each manufacturing model in the design's document."""
+    cam = adsk.cam.CAM.cast(
+        design.parentDocument.products.itemByProductType('CAMProductType'))
+    models = getattr(cam, 'manufacturingModels', None) if cam else None
+    designs = []
+    for model in models or []:
+        occurrence = model.occurrence
+        if occurrence:
+            designs.append(occurrence.component.parentDesign)
+    return designs
+
+
+def _edge_index(edge: adsk.fusion.BRepEdge):
+    native = edge.nativeObject or edge
+    for i, other in enumerate(native.body.edges):
+        if other == native:
+            return i
+    return None
+
+
+def _is_copy_of(saved: adsk.fusion.BRepEdge, candidate: adsk.fusion.BRepEdge):
+    """Whether `candidate` is the same edge of a copy of `saved`'s body: the
+    same body name, the same place in the body's edge list, and the same
+    shape. A manufacturing model's design holds such a copy."""
+    index = _edge_index(saved)
+    return (index is not None and index == _edge_index(candidate)
+            and (saved.nativeObject or saved).body.name
+            == (candidate.nativeObject or candidate).body.name
+            and dc.same_edge_shape(edge_shape(saved), edge_shape(candidate),
+                                   VERTEX_TOL))
+
+
+def _is_token_edge(candidate: adsk.fusion.BRepEdge, token, designs=()):
+    """Whether `token` names this setup-model edge.
+
+    The token is resolved through the design that owns the candidate's body.
+    The edge it gives is seen from that design's root, so it is compared with
+    the candidate by native edge and by the end of the occurrence path. If it
+    does not resolve there, it is tried in `designs` (the manufacturing
+    models' own designs), whose edges are copies: the edge found must be the
+    candidate's copy (see `_is_copy_of`)."""
+    owner = candidate.body.parentComponent.parentDesign
+    saved = find_by_token(owner, token, adsk.fusion.BRepEdge.cast) if owner else None
+    if saved is not None:
+        if saved == candidate:
+            return True
+        if (saved.nativeObject or saved) != (candidate.nativeObject or candidate):
+            return False
+        path, saved_path = _occurrence_path(candidate), _occurrence_path(saved)
+        return not saved_path or path == saved_path or path.endswith('+' + saved_path)
+    for other in designs:
+        if other == owner:
+            continue
+        saved = find_by_token(other, token, adsk.fusion.BRepEdge.cast)
+        if saved is not None:
+            return _is_copy_of(saved, candidate)
+    return False
+
+
+def find_edge(design: adsk.fusion.Design, token, shape, candidates, designs=lambda: ()):
+    """The saved edge: by token, else the one edge from `candidates()` that
+    the token names and that still has the saved shape.
+
+    Design.findEntityByToken does not resolve edges of manufacturing models.
+    Those are looked up among the setup's model edges instead, with the token
+    resolved in the candidate's own design or in one of `designs()`. A
+    coincident edge of another body has the saved shape but is not the saved
+    edge, so shape alone never selects an edge. No match, or more than one
+    distinct match, returns None so the user reselects."""
+    edge = find_by_token(design, token, adsk.fusion.BRepEdge.cast)
+    if edge or not shape:
+        return edge
+    matches = []
+    other_designs = None
+    for candidate in candidates():
+        if abs(candidate.length - shape[0]) > VERTEX_TOL:
+            continue
+        if not dc.same_edge_shape(edge_shape(candidate), shape, VERTEX_TOL):
+            continue
+        if other_designs is None:
+            other_designs = list(designs())
+        if _is_token_edge(candidate, token, other_designs) and candidate not in matches:
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
 
 
 def operation_for_entity(design: adsk.fusion.Design, entity, ops):

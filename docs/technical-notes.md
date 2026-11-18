@@ -168,15 +168,64 @@ Run regressions outside Fusion with `python -m unittest discover -s tests`.
 Fusion API tests use mocks; actual Trace generation and parameter compatibility must
 also be checked in Fusion.
 
-The dialog's execute handler snapshots only the document, setup/operation, edge tokens,
-tool JSON, and width. It performs no Design or CAM mutations. Once the dialog is
-destroyed, a delayed custom event runs the update on Fusion's main thread when the
+The dialog's execute handler snapshots only the document, setup/operation, edges
+(tokens and the picked edges), tool JSON, and width. It performs no Design or CAM
+mutations. Once the dialog is destroyed, a delayed custom event runs the update on Fusion's main thread when the
 selection command is idle. Other commands defer the job until they terminate. A
 changed document or invalidated setup, operation, or edge rejects the queued job.
 Cancellation queues nothing; stopping the add-in cancels queued work. Cross-product
 updates are not grouped into the dialog's single undo transaction. Explicit failure
 rollback below still applies. This separation avoids nesting sketch/CAM edits in a
 Manufacture command's commit; live verification is required after lifecycle changes.
+
+Edges are normally found again by their entity token. `Design.findEntityByToken`
+does not resolve edges of manufacturing models (issue #14), so two fallbacks apply
+only when a token fails:
+
+- The queued job uses the picked edge itself if Fusion still reports it valid.
+- For later edits, each saved edge also stores its shape: its length and nine points
+  evenly spaced along it, ends included. The edge is then the single setup-model
+  edge whose shape matches within 0.001 mm, in either direction, and that the saved
+  token names when resolved through the design owning that edge's body (the
+  manufacturing model's own design). The setup can instead give the edge from
+  the document's design while the token only resolves in a manufacturing
+  model's design; the edge found there is a copy, so it must be the same-numbered
+  edge of a same-named body, in the same place. Shape alone never selects an
+  edge, so a coincident edge of another body is refused. Three points are not enough: two
+  same-radius circles in perpendicular planes share start, middle and end.
+
+No match, or two different matches, asks for reselection. The shape list is an
+optional addition to the saved settings, so older operations load unchanged.
+Lollipop and chamfer paths on manufacturing models stay rejected by the clearance
+setup check.
+
+Live verification (2026-11-17, Fusion 2706.1.17, by Alex Pinson):
+- Issue #14 part (flat part, 2D pockets, linked component), 2 mm DATRON ball end
+  mill: edges selected, valid toolpath generated, operation edited, via the dialog.
+- `xref demo CAM` (linked body in a manufacturing model, 1/4 in ball end mill):
+  no setup-model edge token resolved through the design, and each edge was found
+  again as itself. Two same-radius semicircular arcs in perpendicular planes each
+  generated a valid toolpath, were found again as the picked arc and not the other,
+  and regenerated after an edit. Coincident edges of a second body were refused.
+  Saved tokens still resolved after closing and reopening the document. Editing,
+  reselecting and accepting through the dialog followed the selected edge.
+- The same part with the linked body used directly (no manufacturing model):
+  tokens resolved through the design, so the token failure comes from the
+  manufacturing model, not from the link.
+- `Fusion Free Deburr - 3D Showcase` (maintainer QA, same day and version): an
+  edge picked with a manufacturing model present created a valid operation, but
+  editing it reported one saved edge missing. The setup gave the edge from the
+  document's design and the token only resolved in the manufacturing model's
+  design. With the copy check above, editing it found the edge again (edge 44
+  of body `Showcase`), and a read-only script found nothing once that edge was
+  removed. Editing an operation made before this change, and editing after
+  save, close and reopen, also worked.
+- Not yet verified: lollipop or chamfer cutters on linked edges.
+
+A manufacturing model holds Fusion's own copy of the guide sketch, as a draggable
+control-point spline. The Trace curve selection refers to the sketch in the design,
+so dragging the copy does not change the toolpath. The copy cannot be fixed from
+the design, so the add-in leaves it alone.
 
 Live verification (2026-10-30, Fusion 2705.1.30): the 11 saved edges in
 `Xometry_Mill_Test_Part` produced one contour and generated a valid Trace toolpath
