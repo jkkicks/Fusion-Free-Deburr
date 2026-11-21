@@ -19,9 +19,11 @@ the edge's start. A closed edge, whose ends are both on its seam, is stroked in
 two parts split well away from the seam (at a share of its parameter range or
 of its length) and each part is ordered by its ends.
 Each sample's parameter comes from a point lookup, which must give
-back the sample's own point within 0.005 mm, in order. If any lookup fails
-that (Fusion's lookup on a full circle returns 0 for every point past half
-way), the edge's parameters are found without lookups: a first guess by
+back the sample's own point within 0.005 mm, in order. A lookup out of order
+that does give back its own sample means the samples really are out of order,
+and rejects the edge. If a lookup doesn't give back its sample (Fusion's
+lookup on a full circle returns 0 for every point past half way), the edge's
+parameters are found without lookups: a first guess by
 length along the edge, then Newton steps onto each sample. A sample those
 can't place within 0.005 mm, in order, rejects the edge. Midpoint checks are
 not a continuous error guarantee for surfaces varying sharply between
@@ -120,9 +122,9 @@ ball center's height, clearing the ball already clears the cylinder.
 
 Selected edges are filed in a grid (`SegmentIndex`) so each check reads only
 the segments near the ball; each segment is filed under the cells it passes
-through, not its whole box. An edge that cannot be sampled skips its own chain
-with a warning and, because it allows no material, only makes other checks
-stricter.
+through, not its whole box. An edge that cannot be sampled is skipped with a
+warning before edges are chained, so its neighbours keep their paths; because
+it allows no material, it only makes their checks stricter.
 Fusion's `measureMinimumDistance` to a `BRepEdge` measures to the unbounded
 curve (a straight edge reads as an infinite line), so distances to the
 selected edges use the edges' strokes at 0.001 mm. The chamfer check's

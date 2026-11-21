@@ -582,7 +582,9 @@ class TrimTests(unittest.TestCase):
             fusion.build_chains(edges, self.R, .05, Z)
         self.assertEqual(seen, [[first, second], [first, second]])
 
-    def test_unsampleable_edge_skips_only_its_own_chain(self):
+    def test_unsampleable_edge_skips_only_itself(self):
+        # Its neighbour on the same chain keeps its path, checked without the
+        # skipped edge's break (stricter).
         good, bad = NS(body='part', name='good'), NS(body='part', name='bad')
         segments = [dc.Segment([(0, 0, 0), (1, 0, 0)], None, None, source=e) for e in (good, bad)]
 
@@ -597,8 +599,9 @@ class TrimTests(unittest.TestCase):
                 patch.object(fusion, '_excess', side_effect=lambda *a: checked.append(1)
                              or (lambda p, margin=0.0, enough=None: 0.0)), \
                 patch.object(fusion, '_column_excess', return_value=lambda p: 0.0), \
-                patch.object(dc, 'order_chains', return_value=[([s], False) for s in segments]):
+                patch.object(dc, 'order_chains', side_effect=lambda segs: [(list(segs), False)]) as order:
             chains, _, warnings = fusion.build_chains([good, bad], self.R, .05, Z)
+        self.assertEqual(order.call_args.args[0], segments[:1])
         self.assertEqual(len(chains), 1)
         self.assertEqual(len(checked), 1)
         self.assertEqual(len(warnings), 1)

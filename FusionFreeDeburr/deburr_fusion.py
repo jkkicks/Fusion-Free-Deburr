@@ -182,6 +182,12 @@ def _lookup_parameters(ev, samples, t0, t1):
         if not parameters[-1] <= t <= t1:
             clamped = min(max(t, parameters[-1]), t1)
             if abs(t - clamped) > roundoff:
+                # A lookup that gives back its own sample shows the samples
+                # really are out of order: reject the edge. One that doesn't
+                # (Fusion's full-circle lookup) leaves it to the fallback.
+                ok, q = ev.getPointAtParameter(t) if t0 <= t <= t1 else (False, None)
+                if ok and dc.dist(_tup(q), p) <= SAMPLE_MATCH_TOL:
+                    raise dm.DeburrError('edge samples are out of parameter order')
                 return None
             t = clamped
         # In order is not enough: the parameter must be the sample's own
@@ -709,7 +715,12 @@ def build_chains(edges, radius, width, tool_axis, log=None, check_gouges=True):
                 found.extend(dc.polyline_segments(_edge_polyline(s.source)))
             except dm.DeburrError:
                 unsampled.add(id(s.source))
+                warnings.append(f'Edge {numbers[id(s.source)]} skipped: it could not be sampled '
+                                'for the gouge check')
         shapes = dc.SegmentIndex(found, radius)
+        # Only the unsampled edge is lost: its neighbours still chain and are
+        # checked, without its break, which only makes the check stricter.
+        segments = [s for s in segments if id(s.source) not in unsampled]
     for ordered, closed in dc.order_chains(segments):
         sources = [s.source for s in ordered]
         chain = dc.link_chain(ordered, closed, tool_axis, radius, width, depth)
@@ -719,9 +730,6 @@ def build_chains(edges, radius, width, tool_axis, log=None, check_gouges=True):
                 chains.append(chain)
             continue
         label = _edge_list(sorted(numbers[id(s)] for s in sources))
-        if any(id(s) in unsampled for s in sources):
-            warnings.append(f'{label} skipped: a selected edge could not be sampled for the gouge check')
-            continue
         try:
             limit = gouge_limit(width)
             paths, removed, lost, notes = _trim_gouges(

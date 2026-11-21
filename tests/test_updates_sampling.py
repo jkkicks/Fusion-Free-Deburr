@@ -349,6 +349,13 @@ class SamplingTests(unittest.TestCase):
              patch.object(adsk.core.Point3D, 'create', side_effect=lambda *p: p):
             with self.assertRaisesRegex(dm.DeburrError, 'parameter order'):
                 fusion._refine_samples(edge, samples, .3, .025, (0, 0, 1))
+            # The lookups give back their own samples, so the reversal is
+            # real: it is rejected, never left to the fallback, which here
+            # can't step (no derivative) and would accept its first guesses.
+            edge.evaluator.getFirstDerivative = lambda t: (False, None)
+            with patch.object(fusion, '_length_parameters', side_effect=AssertionError('fallback used')):
+                with self.assertRaisesRegex(dm.DeburrError, 'parameter order'):
+                    fusion._refine_samples(edge, samples, .3, .025, (0, 0, 1))
 
     def test_full_circle_whose_point_lookup_fails_past_half_way_is_placed_by_length(self):
         # Seen on every full circle (hole rims) of a part in Fusion 2706.1.17:
