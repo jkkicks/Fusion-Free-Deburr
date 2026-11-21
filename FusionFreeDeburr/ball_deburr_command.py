@@ -21,6 +21,35 @@ IN_TOOL = 'tool'
 IN_PICK = 'pickTool'
 IN_DIAMETER = 'ballDiameter'
 IN_WIDTH = 'breakWidth'
+IN_SKIP_GOUGE = 'skipGougeChecks'
+IN_GOUGE_GROUP = 'gougeChecks'
+SKIP_GOUGE_NOTICE = ('Gouge checks are off for this operation (Checks tab): paths are not '
+                     'trimmed or rejected for cutting into the part. Simulate before machining.')
+IN_TAB_DEBURR = 'deburrTab'
+IN_TAB_CHECKS = 'checksTab'
+DIALOG_WIDTH = 420  # px; wide enough to show most tool names
+SKIP_GOUGE_TOOLTIP = (
+    'Turns off the checks that stop the cutter cutting into the part beyond the edge break: '
+    'paths are not trimmed and gouging paths are not rejected.'
+    '<br><br>Ball endmills: no part checks remain (they never had neck, shaft, holder or '
+    'fixture checks). Lollipop and chamfer cutters: neck, shaft, holder and fixture checks, '
+    'and approach and withdrawal moves, are still checked.'
+    '<br><br>Use it to see whether a gouge check is why a toolpath fails. Simulate before machining.')
+
+
+def _skip_input(inputs):
+    """The Skip checkbox. The dialog's top-level inputs find it inside its
+    tab and group (checked in Fusion 2706.1.17)."""
+    found = inputs.itemById(IN_SKIP_GOUGE)
+    return adsk.core.BoolValueCommandInput.cast(found) if found else None
+
+
+def _describe(command_input, name, description, full_width=False):
+    """Full name and explanation on hover; full width hides the label."""
+    command_input.tooltip = name
+    command_input.tooltipDescription = description
+    if full_width:
+        command_input.isFullWidth = True
 
 NEW_OP_LABEL = 'New operation'
 TOOL_TYPES = {cam_tools.BALL_END_MILL, *cam_tools.PROFILE_TYPES}
@@ -56,6 +85,7 @@ class DeburrJob:
     # The picked edges themselves. A token cannot always be turned back into
     # its edge (linked components, manufacturing models); these still can.
     edges: tuple = ()
+    skip_gouge_checks: bool = False
 
 
 def init(app, ui, log, handlers):
@@ -171,6 +201,11 @@ def _set_mode(inputs: adsk.core.CommandInputs, op):
 
     if settings:
         adsk.core.ValueCommandInput.cast(inputs.itemById(IN_WIDTH)).value = settings['width']
+    # A new operation always starts with the checks on.
+    skip = _skip_input(inputs)
+    if skip:
+        # Only a saved true: a hand-edited "false" or 1 must not turn checks off.
+        skip.value = bool(settings) and settings.get(deburr_fusion.SKIP_GOUGE_KEY) is True
 
 
 def _fill_tools(inputs: adsk.core.CommandInputs, select_id=None):
@@ -251,7 +286,7 @@ def _update_diameter(inputs):
     text = adsk.core.TextBoxCommandInput.cast(inputs.itemById(IN_DIAMETER))
     choice = _selected_tool(inputs)
     if not choice:
-        text.text = 'No tool selected: use Select tool...'
+        text.text = 'No tool selected'
         return
     tool = choice[1]
     text.text = _session.fmt(cam_tools.diameter_cm(tool))
@@ -284,26 +319,53 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 if op:
                     preselected = s.ops.index(op) + 1
 
-            op_dd = inputs.addDropDownCommandInput(IN_OP, 'Operation', dd_style)
+            # Fusion's label column has a fixed width that doesn't grow with
+            # the dialog, so labels are kept short enough to fit and tooltips
+            # give the full name. Every row stays in the label/control grid
+            # except the operation picker across the top.
+            try:
+                cmd.setDialogSize(DIALOG_WIDTH, 0)  # height 0: fit the inputs
+            except RuntimeError:
+                _log(f'Could not size the dialog:\n{traceback.format_exc()}')
+
+            main = inputs.addTabCommandInput(IN_TAB_DEBURR, 'Deburr').children
+            op_dd = main.addDropDownCommandInput(IN_OP, 'Operation', dd_style)
             op_dd.listItems.add(NEW_OP_LABEL, preselected == 0)
             for j, op in enumerate(s.ops):
                 op_dd.listItems.add(f'Edit: {op.name} ({op.parentSetup.name})', preselected == j + 1)
+            _describe(op_dd, 'Operation', 'Create a new Deburr operation, or edit an existing one.', True)
 
-            setup_dd = inputs.addDropDownCommandInput(IN_SETUP, 'Setup', dd_style)
+            setup_dd = main.addDropDownCommandInput(IN_SETUP, 'Setup', dd_style)
             for i, setup in enumerate(s.setups):
                 setup_dd.listItems.add(setup.name, i == 0)
+            _describe(setup_dd, 'Setup', 'The milling setup the new operation goes in.')
 
-            edges = inputs.addSelectionInput(IN_EDGES, 'Edges', 'Select sharp convex edges to deburr')
+            edges = main.addSelectionInput(IN_EDGES, 'Edges', 'Select sharp convex edges to deburr')
             edges.addSelectionFilter('Edges')
             edges.setSelectionLimits(1, 0)
+            _describe(edges, 'Edges', 'The sharp convex edges to break.')
 
-            inputs.addDropDownCommandInput(IN_TOOL, 'Deburr tool', dd_style)
-            inputs.addBoolValueInput(IN_PICK, 'Tool library', False).text = 'Select tool...'
-            inputs.addTextBoxCommandInput(IN_DIAMETER, 'Tool diameter', '', 1, True)
+            tool_dd = main.addDropDownCommandInput(IN_TOOL, 'Tool', dd_style)
+            _describe(tool_dd, 'Deburr tool',
+                      'A ball endmill, lollipop mill, chamfer mill, or single-profile thread mill.')
+            pick = main.addBoolValueInput(IN_PICK, 'Library', False)
+            pick.text = 'Select tool...'
+            _describe(pick, 'Tool library', 'Pick a tool from a local or cloud tool library.')
+            diameter = main.addTextBoxCommandInput(IN_DIAMETER, 'Dia.', '', 1, True)
+            _describe(diameter, 'Tool diameter', 'The diameter of the selected tool.')
 
             units = s.units.defaultLengthUnits
-            inputs.addValueInput(IN_WIDTH, 'Edge break width', units,
-                                 adsk.core.ValueInput.createByString(DEFAULT_WIDTH.get(units, DEFAULT_WIDTH_MM)))
+            default_width = adsk.core.ValueInput.createByString(DEFAULT_WIDTH.get(units, DEFAULT_WIDTH_MM))
+            width = main.addValueInput(IN_WIDTH, 'Width', units, default_width)
+            _describe(width, 'Edge break width', 'How far the break cuts back each face from the edge.')
+
+            # Like Fusion's own toolpaths, settings rarely changed go on a
+            # separate tab. Inputs in tabs are still found by ID from `inputs`.
+            checks = inputs.addTabCommandInput(IN_TAB_CHECKS, 'Checks').children
+            group = checks.addGroupCommandInput(IN_GOUGE_GROUP, 'Gouge checks')
+            group.isExpanded = True
+            skip = group.children.addBoolValueInput(IN_SKIP_GOUGE, 'Skip', True, '', False)
+            _describe(skip, 'Skip gouge checks', SKIP_GOUGE_TOOLTIP)
 
             _set_mode(inputs, s.ops[preselected - 1] if preselected else None)
         except:
@@ -323,7 +385,8 @@ class CommandActivateHandler(adsk.core.CommandEventHandler):
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args: adsk.core.InputChangedEventArgs):
         try:
-            inputs = args.inputs
+            # args.inputs holds only the changed input's tab; use the whole dialog.
+            inputs = _session.inputs or args.inputs
             if args.input.id == IN_OP:
                 index = adsk.core.DropDownCommandInput.cast(args.input).selectedItem.index
                 _set_mode(inputs, _session.ops[index - 1] if index else None)
@@ -403,9 +466,12 @@ def _capture_job(inputs: adsk.core.CommandInputs, session):
         setup_index = adsk.core.DropDownCommandInput.cast(inputs.itemById(IN_SETUP)).selectedItem.index
         setup = s.setups[setup_index]
 
+    skip = _skip_input(inputs)
+    # Only an explicit tick turns the checks off.
+    skip = bool(skip) and skip.value is True
     return DeburrJob(s.document, setup, op,
                      tuple(edge.entityToken for edge in edges), width,
-                     tool.toJson(), bool(op and is_current_tool), tuple(edges))
+                     tool.toJson(), bool(op and is_current_tool), tuple(edges), bool(skip))
 
 
 def _job_tool(cam, job):
@@ -465,12 +531,18 @@ def _apply_job(job):
     _log(f'Setup "{setup.name}", tool axis {tool_axis}, tool diameter '
          f'{cam_tools.diameter_expression(tool)} -> R={radius} cm, w={width} cm')
 
+    check = not job.skip_gouge_checks
     if cutter is not None:
         bodies, fixtures = lollipop_fusion.setup_obstacles(setup, design)
         chains, used_edges, warnings = lollipop_fusion.build_chains(
-            edges, cutter, width, tool_axis, bodies, fixtures)
+            edges, cutter, width, tool_axis, bodies, fixtures, check)
     else:
-        chains, used_edges, warnings = deburr_fusion.build_chains(edges, radius, width, tool_axis)
+        chains, used_edges, warnings = deburr_fusion.build_chains(
+            edges, radius, width, tool_axis, _log, check)
+    if not check:
+        # Shown every time, so an edit can't regenerate unchecked unnoticed:
+        # the setting is saved with the operation and sits on another tab.
+        warnings = [SKIP_GOUGE_NOTICE] + warnings
     for msg in warnings:
         _log(msg)
     if not chains:
@@ -481,7 +553,7 @@ def _apply_job(job):
     if op:
         sketch = deburr_fusion.update_operation(
             design, op, chains, used_edges, width,
-            None if job.keep_current_tool else tool)
+            None if job.keep_current_tool else tool, job.skip_gouge_checks)
         cam.generateToolpath(op)
         verb = 'Updated'
     else:
@@ -489,7 +561,7 @@ def _apply_job(job):
         sketch, curve_chains = deburr_fusion.build_sketch(design, chains, name)
         try:
             op = deburr_fusion.create_trace(setup, curve_chains, name, tool)
-            deburr_fusion.save_settings(op, used_edges, width, sketch)
+            deburr_fusion.save_settings(op, used_edges, width, sketch, job.skip_gouge_checks)
             cam.generateToolpath(op)
         except Exception:
             if op:

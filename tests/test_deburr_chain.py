@@ -205,5 +205,239 @@ class PolylineTests(unittest.TestCase):
         self.assertEqual(len(dc.polyline_knots(pts)), len(pts) + 2)  # degree 1
 
 
+class CheckedSpanTests(unittest.TestCase):
+    LINE = [(0.0, 0, 0), (4.0, 0, 0), (10.0, 0, 0)]
+    LIMIT, STEP = .01, .5
+
+    def spans(self, excess):
+        # A move is clear only if every tip on it is: check its worst point.
+        def swept(a, b):
+            n = 50
+            return all(excess(dm.add(a, dm.scale(dm.sub(b, a), k / n))) <= self.LIMIT
+                       for k in range(n + 1))
+        return dc.checked_spans(self.LINE, excess, swept, self.LIMIT, self.STEP)
+
+    def test_clear_path_is_unchanged(self):
+        spans, removed = self.spans(lambda p: 0.0)
+        self.assertEqual(spans, [self.LINE])
+        self.assertEqual(removed, [])
+
+    def test_blocked_end_is_trimmed_back_to_the_limit(self):
+        # The ball cuts 2 too far at x=0, easing to nothing at x=2.
+        spans, removed = self.spans(lambda p: max(0.0, 2 - p[0]))
+        self.assertEqual(len(spans), 1)
+        self.assertAlmostEqual(spans[0][0][0], 2 - self.LIMIT, delta=2 * dc.TRIM_TOL)
+        self.assertEqual(spans[0][-1], self.LINE[-1])
+        self.assertIn(self.LINE[1], spans[0])  # path points after the trim are kept
+        self.assertEqual(len(removed), 1)
+        self.assertAlmostEqual(removed[0][0], 2 - self.LIMIT, delta=2 * dc.TRIM_TOL)
+        self.assertEqual(removed[0][1], 2)
+
+    def test_blocked_middle_splits_the_path(self):
+        spans, removed = self.spans(lambda p: 1.0 if 5 < p[0] < 6 else 0.0)
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[0][-1][0], 5, delta=2 * dc.TRIM_TOL)
+        self.assertAlmostEqual(spans[1][0][0], 6, delta=2 * dc.TRIM_TOL)
+        self.assertIn(self.LINE[1], spans[0])
+        self.assertAlmostEqual(removed[0][0], 1, delta=4 * dc.TRIM_TOL)
+
+    def test_narrow_block_between_samples_is_found(self):
+        # Clear at every 0.5 step; only the whole-move check sees it.
+        excess = lambda p: 1.0 if 7.2 < p[0] < 7.3 else 0.0
+        spans, removed = self.spans(excess)
+        self.assertEqual(len(spans), 2)
+        self.assertLess(spans[0][-1][0], 7.2 + 2 * dc.TRIM_TOL)
+        self.assertGreater(spans[1][0][0], 7.3 - 2 * dc.TRIM_TOL)
+
+    def test_every_trimmed_end_is_clear(self):
+        excess = lambda p: max(0.0, 2 - p[0], p[0] - 8)
+        spans, _ = self.spans(excess)
+        for span in spans:
+            for point in (span[0], span[-1]):
+                self.assertLessEqual(excess(point), self.LIMIT)
+
+    def test_fully_blocked_path_is_removed(self):
+        spans, removed = self.spans(lambda p: .5)
+        self.assertEqual(spans, [])
+        self.assertEqual(len(removed), 1)
+        self.assertAlmostEqual(removed[0][0], 10)
+
+    def test_trim_next_to_a_path_point_keeps_the_path_point(self):
+        # Review case: clean-up must not swap the checked corner for a shortcut.
+        corner = [(0.0, 0, 0), (1.0, 0, 0), (1.0, 1.0, 0)]
+        excess = lambda p: 1.0 if p[1] == 0 and p[0] < 1 - 5e-5 else 0.0
+        swept = lambda a, b: excess(a) == 0 and excess(b) == 0 and excess(dm.scale(dm.add(a, b), .5)) == 0
+        spans, _ = dc.checked_spans(corner, excess, swept, .01, .5)
+        self.assertEqual(spans, [[(1.0, 0, 0), (1.0, 1.0, 0)]])
+
+    def test_near_limit_path_is_kept_without_endless_splitting(self):
+        # Review case: every point passes, but the whole-move check never
+        # does; the path must not be dropped as a gouge.
+        calls = []
+
+        def swept(a, b):
+            calls.append(1)
+            return False
+        spans, removed = dc.checked_spans([(0.0, 0, 0), (2.0, 0, 0)], lambda p: .0099, swept,
+                                          .01, .01, .01 / 8)
+        self.assertEqual(spans, [[(0.0, 0, 0), (2.0, 0, 0)]])
+        self.assertEqual(removed, [])
+        self.assertLessEqual(len(calls), 200 * 15)   # 200 moves, split at most three times
+
+    def test_shorten_ends_moves_failing_ends_inward(self):
+        line = [(0.0, 0, 0), (4.0, 0, 0), (10.0, 0, 0)]
+        excess = lambda p: 1.0 if p[0] < 2.5 or p[0] > 9 else 0.0
+        points, removed = dc.shorten_ends(line, excess, .01, .5, 1e-3)
+        self.assertAlmostEqual(points[0][0], 2.5, delta=1e-3)
+        self.assertEqual(points[1], (4.0, 0, 0))           # path points kept
+        self.assertAlmostEqual(points[-1][0], 9, delta=1e-3)
+        self.assertEqual(len(removed), 2)
+        self.assertAlmostEqual(removed[0][0], 2.5, delta=1e-3)
+        self.assertAlmostEqual(removed[1][0], 1, delta=1e-3)
+
+    def test_shorten_ends_exports_the_end_it_checked(self):
+        # Review case: the new end lands within JOIN_TOL of a path point that
+        # itself fails; clean-up must keep the checked end, not that point.
+        line = [(0.0, 0, 0), (.5, 0, 0), (1.0, 0, 0)]
+        bad = lambda p: p[0] > .5 + 3e-5 or abs(p[0] - .5) < 1e-12
+        excess = lambda p: 1.0 if bad(p) else 0.0
+        points, _ = dc.shorten_ends(line, excess, .01, .1, 1e-6)
+        self.assertEqual(excess(points[-1]), 0.0)
+        self.assertEqual(points, dc._clean(points))       # nothing left for clean-up to drop
+
+    def test_shorten_ends_keeps_clear_ends_and_drops_hopeless_paths(self):
+        line = [(0.0, 0, 0), (1.0, 0, 0)]
+        self.assertEqual(dc.shorten_ends(line, lambda p: 0.0, .01, .1), (line, []))
+        points, removed = dc.shorten_ends(line, lambda p: 1.0, .01, .1)
+        self.assertIsNone(points)
+        self.assertEqual(len(removed), 1)
+
+    def test_cut_back_removes_the_end_of_a_path(self):
+        line = [(0.0, 0, 0), (1.0, 0, 0), (1.0, 1.0, 0)]
+        self.assertEqual(dc.cut_back(line, .25), [(0.0, 0, 0), (1.0, 0, 0), (1.0, .75, 0)])
+        self.assertEqual(dc.cut_back(line, 1.5), [(0.0, 0, 0), (.5, 0, 0)])
+        self.assertIsNone(dc.cut_back(line, 2))
+
+    def test_open_loop_continues_past_its_start(self):
+        loop = [(0.0, 0, 0), (1.0, 0, 0), (1.0, 1.0, 0), (0.0, 1.0, 0), (0.0, 0, 0)]
+        opened = dc.open_loop(loop, .25)
+        self.assertEqual(opened[:5], loop)
+        self.assertEqual(opened[-1], (.25, 0, 0))
+        line = [(0.0, 0, 0), (1.0, 0, 0)]
+        self.assertEqual(dc.open_loop(line, .25), line)
+        # A loop shorter than twice the overlap still gets two distinct ends.
+        tiny = [(0.0, 0, 0), (.01, 0, 0), (.01, .01, 0), (0.0, .01, 0), (0.0, 0, 0)]
+        opened = dc.open_loop(tiny, .25)
+        self.assertGreater(dist(opened[0], opened[-1]), .005)
+
+    @staticmethod
+    def box_surface(size, n):
+        """Points and outward normals on the surface of a box from the origin."""
+        nodes, normals = [], []
+        for i in range(n + 1):
+            for j in range(n + 1):
+                a, b = i / n, j / n
+                for p, normal in (((a * size[0], b * size[1], 0), (0, 0, -1)),
+                                  ((a * size[0], b * size[1], size[2]), (0, 0, 1)),
+                                  ((a * size[0], 0, b * size[2]), (0, -1, 0)),
+                                  ((a * size[0], size[1], b * size[2]), (0, 1, 0)),
+                                  ((0, a * size[1], b * size[2]), (-1, 0, 0)),
+                                  ((size[0], a * size[1], b * size[2]), (1, 0, 0))):
+                    nodes.append(p)
+                    normals.append(normal)
+        return nodes, normals
+
+    def test_inward_points_reach_deep_inside_only(self):
+        nodes, normals = self.box_surface((1, 1, 1), 20)
+        deep = dc.inward_points(nodes, normals, nodes, .2)
+        self.assertTrue(deep)
+        self.assertTrue(any(dist(p, (.5, .5, .5)) < .2 for p in deep))
+        self.assertTrue(all(min(dist(p, q) for q in nodes) > .2 for p in deep))
+        # A slab thinner than twice the depth has no point that deep.
+        nodes, normals = self.box_surface((1, 1, .3), 20)
+        inside = [p for p in dc.inward_points(nodes, normals, nodes, .2)
+                  if all(0 <= p[k] <= (1, 1, .3)[k] for k in range(3))]
+        self.assertEqual(inside, [])
+
+    def test_limit_matches_corner_check(self):
+        self.assertEqual(dc.excess_limit(.0254), .00254)
+        self.assertEqual(dc.excess_limit(.001), .001)
+
+
+class DistanceTests(unittest.TestCase):
+    def test_polyline_distance_stops_at_the_ends(self):
+        line = [(0.0, 0, 0), (1.0, 0, 0)]
+        self.assertAlmostEqual(dc.polyline_distance((.5, 2, 0), line), 2)
+        self.assertAlmostEqual(dc.polyline_distance((4, 0, 0), line), 3)
+        self.assertAlmostEqual(dc.polyline_distance((-3, 4, 0), line), 5)
+
+    def test_farthest_finds_the_worst_sample(self):
+        segments = dc.polyline_segments([(0.0, 0, 0), (1.0, 0, 0)])
+        samples = [(x / 100, 0.01 * (x % 7), 0) for x in range(100)] + [(2.0, 0, 0)]
+        self.assertAlmostEqual(dc.farthest(samples, segments, 10), 1.0)
+        self.assertEqual(dc.farthest(samples, segments, .5), .5)   # capped
+        self.assertEqual(dc.farthest(samples, [], .5), .5)          # nothing in reach
+        self.assertEqual(dc.farthest([], segments, .5), 0.0)
+
+    def test_farthest_stops_beyond_enough(self):
+        segments = dc.polyline_segments([(0.0, 0, 0), (1.0, 0, 0)])
+        samples = [(.5, .1, 0), (.5, .9, 0), (.5, .5, 0)]
+        self.assertGreater(dc.farthest(samples, segments, 10, enough=.3), .3)
+        self.assertLessEqual(dc.farthest([(.5, .1, 0), (.5, .2, 0)], segments, 10, enough=.3), .3)
+
+    def test_segment_index_matches_a_full_scan(self):
+        import random
+        rng = random.Random(4)
+        points = [(rng.uniform(-2, 2), rng.uniform(-2, 2), rng.uniform(-1, 1)) for _ in range(60)]
+        segments = dc.polyline_segments(points)
+        index = dc.SegmentIndex(segments, .3)
+        for _ in range(200):
+            center = (rng.uniform(-2, 2), rng.uniform(-2, 2), rng.uniform(-1, 1))
+            reach = rng.uniform(.05, 1)
+            found = set(map(id, index.within(center, reach)))
+            # Every segment truly within reach is found; nothing found is beyond its box.
+            truly = {id(s) for s in segments if dc._segment_distance(center, s[0], s[1]) <= reach}
+            self.assertLessEqual(truly, found)
+            self.assertLessEqual(found, set(map(id, dc.segments_within(segments, center, reach))))
+            hi = tuple(c + .2 for c in center)
+            found = set(map(id, index.near_box(center, hi, reach)))
+            self.assertLessEqual(found, set(map(id, dc.segments_near_box(segments, center, hi, reach))))
+            middle = tuple(c + .1 for c in center)
+            near_middle = {id(s) for s in segments if dc._segment_distance(middle, s[0], s[1]) <= reach}
+            self.assertLessEqual(near_middle, found)
+
+    def test_search_along_a_long_slanted_path_finds_what_is_near_it(self):
+        # Review case: a long plunge on a tilted tool axis; its box holds
+        # far more cells than the plunge comes near.
+        import random
+        rng = random.Random(7)
+        points = [(rng.uniform(0, 20), rng.uniform(0, 20), rng.uniform(0, 20)) for _ in range(40)]
+        segments = dc.polyline_segments(points)
+        index = dc.SegmentIndex(segments, .05)
+        a, b = (0.0, 0.0, 0.0), (20.0, 20.0, 20.0)
+        found = set(map(id, index.near_path(a, b, .5)))
+        for s in segments:
+            # A segment passing within reach of a point on the path is found.
+            for k in range(101):
+                p = dm.add(a, dm.scale(dm.sub(b, a), k / 100))
+                if dc._segment_distance(p, s[0], s[1]) <= .3:
+                    self.assertIn(id(s), found)
+                    break
+
+    def test_long_diagonal_segment_fills_only_the_cells_it_crosses(self):
+        # Review case: a 10 cm diagonal edge with a 1 mm ball would file its
+        # whole bounding box, millions of cells.
+        segment = dc.polyline_segments([(0.0, 0, 0), (10.0, 10.0, 10.0)])
+        index = dc.SegmentIndex(segment, .05)
+        self.assertLess(len(index.cells), 20000)
+        self.assertEqual(len(index.within((5, 5, 5), .01)), 1)
+        self.assertEqual(len(index.within((5, 0, 5), 1)), 0)
+
+    def test_segments_within_reach(self):
+        segments = dc.polyline_segments([(0.0, 0, 0), (1.0, 0, 0), (5.0, 0, 0)])
+        self.assertEqual(len(dc.segments_within(segments, (0.5, .2, 0), .3)), 1)
+        self.assertEqual(len(dc.segments_within(segments, (0.5, .2, 0), 10)), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

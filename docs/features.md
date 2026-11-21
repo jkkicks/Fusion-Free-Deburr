@@ -26,6 +26,8 @@ feature updates it.
 | Linking selected edges into continuous paths, with rolls around corners (refined to a 0.005 mm chord for cutter models) | `deburr_chain.py` (`corner_roll`) |
 | Sampling curved edges to tolerance, drawing the 3D sketch and creating the Trace operation (Trace's own chamfer option is forced off for chamfer tools) | `deburr_fusion.py` |
 | Safety: skips edges that aren't sharp and convex, rejects gouges | `deburr_fusion.py`, `deburr_chain.py` |
+| Safety: ball endmill paths are checked along their whole length, and the plunge onto each end, and trimmed where the ball would remove material beyond the edge break | `deburr_fusion.py` (`_excess`, `_column_excess`, `_trim_gouges`), `deburr_chain.py` (`checked_spans`, `shorten_ends`, `farthest`, `SegmentIndex`) |
+| **Checks** tab, **Gouge checks > Skip**: no trimming or gouge rejection; for lollipop and chamfer cutters neck, shaft, holder, fixture and approach checks stay on; saved on the operation | `ball_deburr_command.py`, `deburr_fusion.py` (`SKIP_GOUGE_KEY`), `lollipop_fusion.py` (`Clearance.check_gouges`) |
 | Safety: neck, shaft, holder and fixture clearance checks against setup models and other bodies; rejects cuts away from the selected edges, including chamfer flank cuts outside the edge break (checked at sampled points) | `lollipop_fusion.py` (`Clearance`) |
 | Safety: rejects ridges a chamfer cutter could cut equally well from either side | `deburr_math.py` (`chamfer_plane`) |
 | Approach and withdrawal moves outside the part; back-side chamfer cuts step toward the tool axis, then move along it | `lollipop_fusion.py` (`add_access`, `_retreat_finder`) |
