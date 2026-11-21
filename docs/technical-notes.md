@@ -13,9 +13,28 @@ tolerance. Non-planar edges also split spans longer than 0.5 mm or whose compute
 tool-tip midpoint differs from the chord midpoint by more than 0.01 mm. Straight
 edges between planes keep just their endpoints. Refinement stops after 12 levels;
 edges that still miss tolerance, and closed edges with too few distinct samples,
-are rejected. Midpoint checks are not a continuous error guarantee for surfaces
-varying sharply between samples. Very small features near the probe size (0.05 mm,
-retried at 0.005 mm for ambiguous containment) may be rejected.
+are rejected. Fusion can return an edge's strokes from its end parameter
+back to its start, so they are put in parameter order first, by which end is
+the edge's start. A closed edge, whose ends are both on its seam, is stroked in
+two parts split well away from the seam (at a share of its parameter range or
+of its length) and each part is ordered by its ends.
+Each sample's parameter comes from a point lookup, which must give
+back the sample's own point within 0.005 mm, in order. A lookup out of order
+that does give back its own sample means the samples really are out of order,
+and rejects the edge. If a lookup doesn't give back its sample (Fusion's
+lookup on a full circle returns 0 for every point past half way), the edge's
+parameters are found without lookups: a first guess by
+length along the edge, then Newton steps onto each sample. A sample those
+can't place within 0.005 mm, in order, rejects the edge. Midpoint checks are
+not a continuous error guarantee for surfaces varying sharply between
+samples. Very small features near the probe size (0.05 mm, retried at
+0.005 mm for ambiguous containment) may be rejected.
+
+Saved edge shapes end at the edge's last parameter exactly: Fusion raises an
+error for a parameter even a rounding error past the end. An error Fusion
+raises while sampling an edge rejects that edge like any other failure (a
+ball skips it; a lollipop or chamfer cutter, which needs every edge, stops
+with a message), and a shape that can't be computed is saved as none.
 
 Crossings must coincide in 3D within 0.001 mm. Failed corner construction or clearance
 checks and connectors cutting more than the allowed excess depth are split into separate
@@ -103,9 +122,9 @@ ball center's height, clearing the ball already clears the cylinder.
 
 Selected edges are filed in a grid (`SegmentIndex`) so each check reads only
 the segments near the ball; each segment is filed under the cells it passes
-through, not its whole box. An edge that cannot be sampled skips its own chain
-with a warning and, because it allows no material, only makes other checks
-stricter.
+through, not its whole box. An edge that cannot be sampled is skipped with a
+warning before edges are chained, so its neighbours keep their paths; because
+it allows no material, it only makes their checks stricter.
 Fusion's `measureMinimumDistance` to a `BRepEdge` measures to the unbounded
 curve (a straight edge reads as an infinite line), so distances to the
 selected edges use the edges' strokes at 0.001 mm. The chamfer check's
@@ -452,3 +471,24 @@ the diagnostic post. The user opened that operation with `Edit Deburr`,
 accepted it unchanged, and it regenerated. The trim message goes to the Text
 Commands log rather than a message box, because trimming is expected; skipped
 edges and split corners still show one.
+
+Edges failing on a scooped soft jaw (2026-11-21): on an unsaved soft jaw in
+Fusion 2706.1.17 (Windows), with the outline of a scoop cut into a corner
+selected (eight edges: the top edge, the scoop's arc on the top face, and its
+profile down the side face), Deburr failed with "3 : invalid argument
+parameter". Two edges, a straight edge between the side face and the scoop and
+the arc, had strokes running from their end parameter back to their start, so
+refinement never converged and they were skipped ("tool-tip sampling tolerance
+could not be reached"). Saving the edge shapes then asked Fusion for a point
+just past the end of the arc and of a top edge, and the whole operation was
+rolled back. With the fix, run through the API with a 1/4 in ball and a
+0.020 in width, all eight edges built into two chains with no warnings;
+0.76 mm of path came off at the two corners where the outline branches.
+On the same part every full circle (four 12 mm hole rims) had the point
+lookup that returns 0 past half way, and the reachable rims failed with
+"tool-tip sampling tolerance could not be reached". With the fix, checked
+with the tool axis flipped so the rims face the cutter, the two outer rims
+built as one 360 degree pass with every tool tip 4.023 mm from the hole's
+axis, and the two concave step rims were rejected as before. Over all 61
+edges of the part, the fix only added edges: the two scoop edges and six
+0.1 mm edges that failed before.
