@@ -20,9 +20,103 @@ retried at 0.005 mm for ambiguous containment) may be rejected.
 Crossings must coincide in 3D within 0.001 mm. Failed corner construction or clearance
 checks and connectors cutting more than the allowed excess depth are split into separate
 Trace contours. For ball endmills, corner ball-clearance checks sample straight spans at intervals no larger
-than 0.5 mm or a quarter ball radius. They inspect the selected body only and do not prove
-continuous clearance or check shank, holder, fixtures, other bodies, or Fusion's linking
-moves. Simulate generated paths and inspect retracts before machining.
+than 0.5 mm or a quarter ball radius. They inspect every body with a selected edge and do not prove
+continuous clearance or check shank, holder or fixtures. Simulate generated paths and
+inspect retracts before machining.
+
+Each linked ball path is then checked along its whole length and cut back where
+the ball removes too much (`checked_spans`). The rule is the one the chamfer
+check uses: every bit of material the ball removes must lie within the break
+width, plus a limit, of a selected edge. Material within the break of any
+selected edge counts, so a ball may reach into the opposite lip of a slot as
+long as it stays within that lip's own break. At each tip the ball is
+intersected with every body that has a selected edge, including edges that
+were skipped (a path on one body can run into another, and edges of touching
+bodies can link into one chain), and
+the removed material is sampled at its
+vertices, its edge strokes (0.01 mm) and the nodes of a mesh with sides up to
+a quarter of the width. The vertices and edge strokes are measured first, and
+a cut they already fail is not meshed, so a ball far too big for a feature is
+rejected quickly. A region that would still need more than 200,000 triangles
+at that resolution skips its chain with a warning rather than being checked
+more coarsely. The farthest sample from the selected edges, minus the width,
+is the excess; a ball whose center would lie inside the part reports its
+center's own distance, or no depth when that is within the limit. The limit is `excess_limit` (0.1 times the width, at
+least 0.01 mm, the same as the corner check) plus the 0.01 mm path tolerance.
+The path is split into moves no longer than the limit. A move passes when a
+ball grown by half its length, centred at its middle, which contains every
+ball along the move, removes nothing beyond the limit. A move that fails is
+halved until its halves pass or both of its ends fail. A move an eighth of the
+limit long that still fails is clear if both its ends pass, and removed
+otherwise, so trims land within an eighth of the limit and only a failed point
+check counts as a gouge; a blocked stretch in the middle splits the contour.
+Each clear stretch is its own contour so trims are never bridged, and a trim
+point next to a path point gives way to the path point. Points between mesh
+nodes are not measured: a point inside a mesh triangle can lie up to about 0.15
+times the width farther from the selected edges than the nearest node (more
+for breaks under 0.04 mm, where the mesh side is held at 0.01 mm), so a face
+of the removed material can pass while up to that much past the limit.
+Distance to one straight edge is largest at a triangle corner, which is
+sampled; the gap matters where the material lies between two selected edges,
+such as a slot floor with both lips selected. The plunge check uses the same
+sampling. A clear window shorter than one move inside a blocked stretch is
+dropped. Like the chamfer
+check, the surface samples miss a point deep inside the removed material that
+is farther from the selected edges than its surface, which can happen only
+when selected edges surround the material, for example a ball swallowing a
+small feature whose edges are all selected. A ball whose center would lie
+inside the part fails outright, and points inside the material are sampled
+too: from the part's own faces (not the ball's or the plunge column's),
+steps of a quarter, half, one and two widths along the inward mesh normal
+that land inside the tool, in no grid cell (a quarter width across) next to
+one holding a surface sample, and inside the material by a containment test
+(`inward_points`). In practice the first counted point is about half a width
+deep, so the core of a swallowed feature is sampled once it is about one width
+thick; thinner than that, its core can be cut by up to about a quarter of a
+width beyond the limit unseen. A move no longer than an eighth of the
+limit whose ends pass can still differ from its end balls by at most a
+sixteenth of the limit (a few micrometres for a 0.25 mm break, about
+0.06 mm for a 10 mm break).
+
+Trace reaches and leaves every contour straight along the tool axis (full
+retracts). That sweeps the ball at the end plus a cylinder of the ball's
+radius from its center up past the top of the part, which can reach farther
+than the ball wherever material lies entirely above the ball's center, such
+as an overhang. Each contour end is checked with the same rule on that
+cylinder (`_column_excess`) and moved inward (`shorten_ends`), 0.5 mm at a time and then by bisection, until it
+passes. The column has the ball's radius: a shank wider than the ball is not
+checked, as elsewhere for ball endmills.
+Trace moves the seam of a closed contour (in Fusion it entered a hole-rim loop
+about 48 degrees from the sketch's start), so a closed ball loop is cut
+0.1 mm past its start (`open_loop`) and exported open; Trace then entered and
+left at its two checked ends. If trimming for the plunge brings the two ends
+back together, the end is cut back 0.1 mm at a time (up to three times) so
+the contour stays open; a path too short for that is dropped. Each end is
+cleaned up as soon as it is moved, so the end that was checked is the one
+exported, and both exported ends are checked once more before export. The plunge check reads the selected edges along
+the column's axis, so a long slanted column does not read every grid cell of
+its box. For walls and bosses that reach the
+ball center's height, clearing the ball already clears the cylinder.
+
+Selected edges are filed in a grid (`SegmentIndex`) so each check reads only
+the segments near the ball; each segment is filed under the cells it passes
+through, not its whole box. An edge that cannot be sampled skips its own chain
+with a warning and, because it allows no material, only makes other checks
+stricter.
+Fusion's `measureMinimumDistance` to a `BRepEdge` measures to the unbounded
+curve (a straight edge reads as an infinite line), so distances to the
+selected edges use the edges' strokes at 0.001 mm. The chamfer check's
+distance to the selected edges had the same problem and now uses the same
+strokes.
+
+With **Gouge checks > Skip** on, ball paths skip the corner excess-depth check and
+the trimming above. Lollipop and chamfer cutting paths skip the ball-depth and
+"cut away from the selected edges" checks against setup models; fixtures and the
+neck, shaft and holder sections are still checked. Their approach, withdrawal
+and back-side retreat moves keep every check, so a cutting path that gouges at
+its ends can still be rejected for having no clear approach. The setting is
+saved as an optional `skip_gouge_checks` key, written only when it is on, so
+operations saved without it load with the checks on.
 
 Lollipop contact is limited by both the neck's intersection with the spherical head
 and the defined flute length. Corner rolls use the same contact limit; the generic
@@ -326,3 +420,32 @@ picking its `Document` entry created `Ball Deburr 6`. All three use the one
 document copy (#52) and generated valid toolpaths. A Deburr with the 6 mm ball
 after renumbering that document tool (#1 to #3) also worked, as did editing an
 existing Deburr operation with `Edit Deburr` and switching it to a library tool.
+
+Ball path ends gouging other faces (2026-11-20): only corners were checked, so a
+path that ran down a slope into a floor kept going. On an unsaved test part in
+Fusion 2706.1.17 (Windows), three linked edges (two slopes and an arch along the
+top of a riser, 55.8 mm of path) with a 1/4 in ball and 0.010 in width cut up
+to 1.06 mm into the floor's outer corner at both ends. With the fix, run
+through the API, 4.75 mm of path came off in total, an independent check every
+0.05 mm found the ball touching no face other than the selected edges' own
+faces, balls at eight heights up to 15 mm straight above both ends removed
+nothing beyond the break, and generation took about 9 s. A 10 mm tall boss 1 mm
+behind a top edge trimmed the path around it, and balls every 0.05 mm up to
+10 mm above the new ends removed nothing beyond the break; the
+plunge check itself measured 8.2 mm through the boss and nothing beside or
+above it. The chamfer check with stroked edge distances, through the API on a
+step block with a 10 mm 90 degree chamfer mill and 0.5 mm width, accepted a top
+edge ending at two outside corners and rejected one running into the step's
+wall ("cutter removes material away from the selected edges"). With the inside
+samples, the user's part took 11.5 to 14 s. A hole-rim loop exported open
+started and ended at its checked start in the posted toolpath. A 12 mm ball on
+a 4 mm hole with a 0.02 mm break was skipped with a warning in 1.9 s. In a scratch document, through the API: a 20 degree ramp into a
+floor in a component moved 3 cm and turned 30 degrees lost 1.54 mm of path
+(both ends); a 3.5 mm slot with both lips selected (6 mm ball, 0.5 mm break)
+and a 1.4 mm hole (4 mm ball) were skipped with warnings; a 3 mm slot with
+both lips (4 mm ball, 0.6 mm break) and a 10 mm hole (4 mm ball) were kept
+whole. An earlier version of the fix was checked on the posted toolpath with
+the diagnostic post. The user opened that operation with `Edit Deburr`,
+accepted it unchanged, and it regenerated. The trim message goes to the Text
+Commands log rather than a message box, because trimming is expected; skipped
+edges and split corners still show one.

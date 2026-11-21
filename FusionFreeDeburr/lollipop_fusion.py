@@ -118,10 +118,13 @@ def _cylinder_bounds(a, b, radius, axis):
 
 
 class Clearance:
-    def __init__(self, cutter, axis, bodies, fixtures, width, edges=()):
+    def __init__(self, cutter, axis, bodies, fixtures, width, edges=(), check_gouges=True):
         self.cutter, self.axis = cutter, dm.normalize(axis)
         self.bodies, self.fixtures, self.width = list(bodies), list(fixtures), width
         self.edges = list(edges)  # selected edges: cones may cut only near them
+        # False: the cutting head or flanks may cut the setup models anywhere.
+        # Fixtures and the neck, shaft and holder are still checked.
+        self.check_gouges = check_gouges
         self.measure = adsk.core.Application.get().measureManager
         self.temp = adsk.fusion.TemporaryBRepManager.get()
         self.cache = {}
@@ -136,6 +139,8 @@ class Clearance:
         outside = adsk.fusion.PointContainment.PointOutsidePointContainment
         for body in self.bodies + self.fixtures:
             fixture = body in self.fixtures
+            if not fixture and not self.check_gouges:
+                continue
             allowance = 0 if fixture else self.width
             if body.pointContainment(point) != outside:
                 return 'ball center enters model or fixture'
@@ -152,14 +157,19 @@ class Clearance:
         bound on the distance to the selected edges."""
         if self._edge_boxes is None:
             self._edge_boxes = [_box(edge) for edge in self.edges]
-        p = adsk.core.Point3D.create(*point)
+            self._edge_shapes = [None] * len(self.edges)
         count = len(self.edges)
         # Consecutive samples usually lie near the same edge: try it first.
         for i in [(self._last_edge + j) % count for j in range(count)]:
             lo, hi = self._edge_boxes[i]
             if any(point[k] < lo[k] - limit or point[k] > hi[k] + limit for k in range(3)):
                 continue
-            distance = self.measure.measureMinimumDistance(p, self.edges[i]).value
+            # measureMinimumDistance to a BRepEdge measures to the unbounded
+            # curve (a straight edge reads as an infinite line); measure to
+            # the edge's own points instead.
+            if self._edge_shapes[i] is None:
+                self._edge_shapes[i] = df._edge_polyline(self.edges[i])
+            distance = dc.polyline_distance(point, self._edge_shapes[i])
             if distance <= limit:
                 self._last_edge = i
                 return distance
@@ -215,7 +225,7 @@ class Clearance:
     def _cone(self, tip, margin):
         """Every cutting flank may remove material only within the edge break
         of a selected edge, and must not touch fixtures at all."""
-        obstacles = self.bodies + self.fixtures
+        obstacles = self.bodies + self.fixtures if self.check_gouges else self.fixtures
         for z0, r0, z1, r1 in self.cutter.frustums:
             # Cover every point within `margin` of the flank: offset the slanted
             # surface by margin (radial growth margin * sqrt(1 + slope^2)) and
@@ -385,17 +395,22 @@ def _retreat_finder(segments, variant, axis, width):
     return find
 
 
-def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=()):
+def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=(), check_gouges=True):
     """Build and validate all selected edges; reject the operation on any failure.
 
     A cutter with several flanks (a double-angle chamfer cutter) uses the
     first flank that can cut each edge, topside first. Edges cut by
-    different flanks are never linked into one chain."""
+    different flanks are never linked into one chain.
+
+    check_gouges=False lets the cutting paths cut the setup models anywhere;
+    approach and withdrawal moves are still fully checked."""
     if not edges or not math.isfinite(width) or width <= 0:
         raise dm.DeburrError('select edges and a positive finite edge break')
     axis = dm.normalize(tool_axis)
     edges = setup_edges(edges, bodies)
     clearance = Clearance(cutter, axis, bodies, fixtures, width, edges)
+    cutting = clearance if check_gouges else Clearance(
+        cutter, axis, bodies, fixtures, width, edges, check_gouges=False)
     ids = df._FaceIds()
     variants = cutter.variants()
     groups = [[] for _ in variants]
@@ -417,12 +432,12 @@ def build_chains(edges, cutter, width, tool_axis, bodies, fixtures=()):
         retreats = _retreat_finder(segments, variant, axis, width)
         for ordered, closed in dc.order_chains(segments):
             depth = None
-            if not hasattr(variant, 'frustums'):
+            if check_gouges and not hasattr(variant, 'frustums'):
                 depth = df._cut_depth(ordered[0].source.body, variant.radius, axis)
             chain = dc.link_chain(ordered, closed, axis, variant.radius, width, depth, variant)
             notes.extend(chain.notes)
             for points in dc.chain_polylines(chain):
-                error = clearance.path(points)
+                error = cutting.path(points)
                 if error:
                     raise dm.DeburrError('cutting path: ' + error)
                 points = add_access(points, directions, clearance, retreats)

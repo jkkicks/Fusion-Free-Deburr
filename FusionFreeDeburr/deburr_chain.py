@@ -25,6 +25,7 @@ ROLL_STEP_DEG = 5.0          # angular step when rolling around a convex corner
 ROLL_CHORD_TOL = 5e-4        # cm; cutter-model roll chords stay this close to the arc
 ROLL_MAX_STEPS = 4096
 CROSSING_SEARCH = 200        # segments searched back/forward for a crossing
+TRIM_TOL = 1e-4              # cm; trimmed path ends lie within this of the clear limit
 
 
 @dataclass
@@ -319,7 +320,7 @@ def _corner(k, a_end, b_start, a_tip, b_tip, tool_axis, radius, width, depth, no
         notes.append(f'corner {k + 1}: clearance check failed; paths split')
         return None
     excess = best_depth - edge_depth
-    if excess > max(0.1 * width, 1e-3):
+    if excess > excess_limit(width):
         notes.append(f'corner {k + 1}: the ball cuts about {excess * 10:.3f} mm deeper than '
                      f'the edge break here; paths split')
         return None
@@ -363,6 +364,370 @@ def link_chain(segments, closed, tool_axis, radius, width, depth=None, cutter=No
             if len(points) >= 2:
                 chain.pieces.append(Piece(points))
     return chain
+
+
+# --- Trimming where the ball cuts too far ------------------------------------
+
+def polyline_distance(point, polyline):
+    """Distance from `point` to the nearest point of `polyline`, ends included."""
+    best = math.inf
+    for a, b in zip(polyline, polyline[1:]):
+        best = min(best, _segment_distance(point, a, b))
+    return best if len(polyline) > 1 else dist(point, polyline[0])
+
+
+def _segment_distance(point, a, b):
+    ab = dm.sub(b, a)
+    length2 = dm.dot(ab, ab)
+    t = 0.0 if length2 < 1e-24 else max(0.0, min(1.0, dm.dot(dm.sub(point, a), ab) / length2))
+    return dist(point, dm.add(a, dm.scale(ab, t)))
+
+
+def box_gap(point, lo, hi):
+    return math.sqrt(sum(max(lo[k] - point[k], 0, point[k] - hi[k]) ** 2 for k in range(3)))
+
+
+def polyline_segments(polyline):
+    """[(a, b, lo, hi)] for each segment of `polyline`, with its bounding box."""
+    return [(a, b, tuple(min(a[k], b[k]) for k in range(3)), tuple(max(a[k], b[k]) for k in range(3)))
+            for a, b in zip(polyline, polyline[1:])]
+
+
+def segments_within(segments, center, reach):
+    """The segments that come within `reach` of `center`."""
+    return [s for s in segments if box_gap(center, s[2], s[3]) <= reach]
+
+
+def segments_near_box(segments, lo, hi, reach):
+    """The segments whose boxes come within `reach` of the box lo..hi."""
+    return [s for s in segments if all(s[2][k] <= hi[k] + reach and s[3][k] >= lo[k] - reach
+                                       for k in range(3))]
+
+
+class SegmentIndex:
+    """Segments filed in a grid of `cell`-sized cubes by their boxes, so a
+    search near one point reads only the cells around it."""
+
+    def __init__(self, segments, cell):
+        self.cell, self.cells = cell, {}
+        for s in segments:
+            # File the segment under the cells it passes through: the boxes of
+            # pieces no longer than a cell. Its own box would fill a solid
+            # block of cells for a long diagonal edge.
+            a, b = s[0], s[1]
+            n = max(1, math.ceil(dist(a, b) / cell))
+            keys = set()
+            for k in range(n):
+                p = dm.add(a, dm.scale(dm.sub(b, a), k / n))
+                q = dm.add(a, dm.scale(dm.sub(b, a), (k + 1) / n))
+                keys.update(self._keys([min(p[i], q[i]) for i in range(3)],
+                                       [max(p[i], q[i]) for i in range(3)]))
+            for key in keys:
+                self.cells.setdefault(key, []).append(s)
+
+    def _keys(self, lo, hi):
+        first = [math.floor(c / self.cell) for c in lo]
+        last = [math.floor(c / self.cell) for c in hi]
+        return [(i, j, k) for i in range(first[0], last[0] + 1)
+                for j in range(first[1], last[1] + 1) for k in range(first[2], last[2] + 1)]
+
+    def near_box(self, lo, hi, reach):
+        """The segments filed in cells within `reach` of the box lo..hi whose
+        boxes come within `reach` of it. A segment is filed only under the
+        cells it passes through, so every segment that truly comes within
+        `reach` is found; one whose box does but whose line does not may
+        be left out, which only makes a check stricter."""
+        found = {}
+        for key in self._keys([c - reach for c in lo], [c + reach for c in hi]):
+            for s in self.cells.get(key, ()):
+                found[id(s)] = s
+        return segments_near_box(found.values(), lo, hi, reach)
+
+    def within(self, center, reach):
+        """The segments that come within `reach` of `center`."""
+        return segments_within(self.near_box(center, center, reach), center, reach)
+
+    def near_path(self, a, b, reach):
+        """The segments whose boxes come within `reach` of the straight path
+        a-b, read along the path: a long slanted path's box holds far more
+        cells than the path comes near."""
+        n = max(1, math.ceil(dist(a, b) / self.cell))
+        keys = set()
+        for k in range(n):
+            p = dm.add(a, dm.scale(dm.sub(b, a), k / n))
+            q = dm.add(a, dm.scale(dm.sub(b, a), (k + 1) / n))
+            keys.update(self._keys([min(p[i], q[i]) - reach for i in range(3)],
+                                   [max(p[i], q[i]) + reach for i in range(3)]))
+        found = {}
+        for key in keys:
+            for s in self.cells.get(key, ()):
+                found[id(s)] = s
+        lo = [min(a[i], b[i]) for i in range(3)]
+        hi = [max(a[i], b[i]) for i in range(3)]
+        return segments_near_box(found.values(), lo, hi, reach)
+
+
+_NEIGHBOURS = [(i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)]
+
+
+def inward_points(nodes, normals, samples, depth, steps=(1, 2, 4, 8)):
+    """Candidate points deep inside a solid sampled on its surface: from one
+    surface node per `depth`-sized cell, step `depth` times each of `steps`
+    against its outward normal, and keep the points whose cell and its 26
+    neighbours hold none of `samples` (so they lie more than `depth`, and up
+    to about twice that, from every sample).
+
+    A point deep inside can be farther from something (selected edges) than
+    every surface sample. In a solid thinner than about twice `depth`, every
+    step lands near the opposite surface or outside, so nothing is kept. The
+    caller must still test that a kept point is inside the solid."""
+    def cell(p):
+        return (math.floor(p[0] / depth), math.floor(p[1] / depth), math.floor(p[2] / depth))
+    occupied = {cell(p) for p in samples}
+    seen, found = set(), []
+    for node, normal in zip(nodes, normals):
+        key = cell(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        for step in steps:
+            p = (node[0] - normal[0] * depth * step, node[1] - normal[1] * depth * step,
+                 node[2] - normal[2] * depth * step)
+            c = cell(p)
+            if not any((c[0] + i, c[1] + j, c[2] + k) in occupied for i, j, k in _NEIGHBOURS):
+                found.append(p)
+    return found
+
+
+def cut_back(points, length):
+    """`points` with the last `length` of the path removed, or None if the
+    path is not longer than that."""
+    remaining = length
+    pts = list(points)
+    while len(pts) >= 2:
+        step = dist(pts[-2], pts[-1])
+        if step > remaining:
+            a, b = pts[-2], pts[-1]
+            pts[-1] = dm.add(b, dm.scale(dm.sub(a, b), remaining / step))
+            return pts
+        remaining -= step
+        pts.pop()
+    return None
+
+
+def open_loop(points, overlap):
+    """A closed polyline continued past its start by `overlap`, so its two
+    ends differ. Trace may move the seam of a closed contour to any point;
+    an open one starts and ends where it is drawn."""
+    if len(points) < 3 or dist(points[0], points[-1]) > JOIN_TOL:
+        return points
+    # A loop shorter than twice the overlap still gets two distinct ends.
+    overlap = min(overlap, sum(dist(a, b) for a, b in zip(points, points[1:])) / 2)
+    extra, travelled = [], 0.0
+    for a, b in zip(points, points[1:]):
+        step = dist(a, b)
+        if travelled + step >= overlap:
+            extra.append(dm.add(a, dm.scale(dm.sub(b, a), (overlap - travelled) / step)))
+            break
+        extra.append(b)
+        travelled += step
+    return points + extra
+
+
+def farthest(samples, segments, cap, enough=None):
+    """The largest distance from any of `samples` to its nearest segment,
+    with each distance capped at `cap` (and `cap` when there are no segments).
+
+    With `enough`, only whether the result exceeds `enough` matters: the
+    search stops at the first sample beyond it (returning that sample's
+    distance) and may overstate results that stay within it.
+
+    Samples are visited cell by cell, so neighbours are usually nearest the
+    same segment. The distance to that segment bounds the sample's nearest
+    distance; only a sample it does not settle is measured to every segment."""
+    if not samples:
+        return 0.0
+    if not segments:
+        return cap
+    size = max(cap / 8, 1e-4)
+    samples = sorted(samples, key=lambda p: tuple(math.floor(c / size) for c in p))
+    best, last = -math.inf, 0
+    for point in samples:
+        bound = best if enough is None else max(best, enough)
+        a, b, _, _ = segments[last]
+        d = _segment_distance(point, a, b)
+        if d <= bound:
+            if enough is not None:
+                best = max(best, d)
+            continue
+        for i, (a, b, _, _) in enumerate(segments):
+            other = _segment_distance(point, a, b)
+            if other < d:
+                d, last = other, i
+        best = max(best, min(cap, d))
+        if enough is not None and best > enough:
+            return best
+    return best
+
+
+def excess_limit(width):
+    """How much farther than the edge break the ball may cut (cm)."""
+    return max(0.1 * width, 1e-3)
+
+
+def checked_spans(points, excess, swept, limit, step, shortest=TRIM_TOL):
+    """The parts of tool-tip polyline `points` the ball can follow.
+
+    excess(tip): how far beyond the edge break the ball cuts with its tip at
+    that point. swept(a, b): True only if every tip on the straight move a-b
+    cuts within `limit` (a conservative check of the whole move). The path is
+    split into moves at most `step` long; each move that `swept` rejects is
+    halved until its halves pass or both its ends are blocked. A move no
+    longer than `shortest` that `swept` still rejects is clear if both its
+    ends pass and blocked otherwise, so trims land within `shortest` of the
+    limit and only a failed point check counts as a gouge.
+
+    Returns (spans, removed): the clear polylines in path order, keeping the
+    path's own points and adding trim points, and one (length, deepest
+    excess) per removed stretch. A trim point within JOIN_TOL of a path point
+    gives way to the path point, which lies on the checked side."""
+    samples = []                        # (point, distance along the path, is a path point)
+    position = 0.0
+    for a, b in zip(points, points[1:]):
+        n = max(1, math.ceil(dist(a, b) / step))
+        for k in range(n):
+            samples.append((dm.add(a, dm.scale(dm.sub(b, a), k / n)),
+                            position + dist(a, b) * k / n, k == 0))
+        position += dist(a, b)
+    samples.append((points[-1], position, True))
+
+    known = {}
+
+    def at(p):
+        if p not in known:
+            known[p] = excess(p)
+        return known[p]
+
+    pieces = []                         # (a, b, length, clear, deepest)
+
+    def classify(a, b, length):
+        if a in known and known[a] > limit and at(b) > limit:
+            # Inside a blocked stretch: two blocked ends settle the move.
+            pieces.append((a, b, length, False, max(known[a], known[b])))
+            return
+        if swept(a, b):
+            pieces.append((a, b, length, True, 0.0))
+            return
+        ea, eb = at(a), at(b)
+        if (ea > limit and eb > limit) or length <= shortest * (1 + 1e-9):
+            clear = ea <= limit and eb <= limit
+            pieces.append((a, b, length, clear, 0.0 if clear else max(ea, eb)))
+            return
+        middle = dm.scale(dm.add(a, b), .5)
+        classify(a, middle, length / 2)
+        classify(middle, b, length / 2)
+
+    spans, removed, span, gap = [], [], None, None
+    for (a, pa, _), (b, pb, vertex) in zip(samples, samples[1:]):
+        first = len(pieces)
+        classify(a, b, pb - pa)
+        for k in range(first, len(pieces)):
+            p, q, length, clear, deepest = pieces[k]
+            last = k == len(pieces) - 1
+            if clear:
+                if gap is not None:
+                    removed.append(gap)
+                    gap = None
+                if span is None:
+                    span = [p]
+                if last and vertex:     # moves between path points are straight
+                    span.append(q)
+            else:
+                if span is not None:
+                    if span[-1] != p:
+                        span.append(p)
+                    spans.append(span)
+                    span = None
+                gap = (gap[0] + length, max(gap[1], deepest)) if gap else (length, deepest)
+    if span is not None:
+        if span[-1] != points[-1]:
+            span.append(points[-1])
+        spans.append(span)
+    if gap is not None:
+        removed.append(gap)
+    for span in spans:
+        # A trim point next to a path point: keep the path point, so clean-up
+        # never swaps two checked moves for an unchecked shortcut.
+        if len(span) > 2 and dist(span[0], span[1]) <= JOIN_TOL:
+            del span[0]
+        if len(span) > 2 and dist(span[-1], span[-2]) <= JOIN_TOL:
+            del span[-1]
+    spans = [s for s in (_clean(s) for s in spans) if len(s) >= 2]
+    return spans, removed
+
+
+def shorten_ends(points, excess, limit, step, shortest=TRIM_TOL):
+    """Move the ends of polyline `points` inward until excess(end) <= limit.
+
+    excess(point) judges an end on its own (for example the plunge straight
+    down onto it). From each end, points every `step` along the path are
+    tried until one passes; the boundary is then bisected to within
+    `shortest`. Points between the new end and the far end are not
+    rechecked: only the ends matter.
+
+    Returns (points or None, removed): the shortened polyline (None when no
+    point passes, or nothing usable is left) and one (length, deepest excess)
+    per shortened end."""
+    removed = []
+
+    def from_start(pts):
+        first = excess(pts[0])
+        if first <= limit:
+            return pts
+        deepest, travelled = first, 0.0
+        for i, (a, b) in enumerate(zip(pts, pts[1:])):
+            length = dist(a, b)
+            n = max(1, math.ceil(length / step))
+            bad = a
+            for k in range(1, n + 1):
+                p = b if k == n else dm.add(a, dm.scale(dm.sub(b, a), k / n))
+                value = excess(p)
+                if value > limit:
+                    deepest, bad = max(deepest, value), p
+                    continue
+                good = p
+                while dist(bad, good) > shortest:
+                    middle = dm.scale(dm.add(bad, good), .5)
+                    value = excess(middle)
+                    if value > limit:
+                        deepest, bad = max(deepest, value), middle
+                    else:
+                        good = middle
+                rest = pts[i + 1:]              # starts with b
+                if rest[0] != good and dist(good, rest[0]) <= JOIN_TOL and excess(rest[0]) <= limit:
+                    # Like checked_spans: a new end next to a path point
+                    # gives way to the path point, so clean-up keeps it.
+                    good = rest[0]
+                removed.append((travelled + dist(a, good), deepest))
+                return [good] + (rest[1:] if rest[0] == good else rest)
+            travelled += length
+        removed.append((travelled, deepest))
+        return None
+
+    def settled(pts):
+        # Clean up right away, while the checked end comes first: clean-up
+        # keeps the first of two points closer than JOIN_TOL, so the end
+        # that was checked is the one exported.
+        if pts is None:
+            return None
+        pts = _clean(pts)
+        return pts if len(pts) >= 2 else None
+
+    pts = settled(from_start(list(points)))
+    if pts is not None:
+        pts = settled(from_start(pts[::-1]))
+        pts = pts[::-1] if pts is not None else None
+    return pts, removed
 
 
 # --- Output as one polyline per chain ----------------------------------------

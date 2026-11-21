@@ -210,6 +210,21 @@ class LollipopTests(unittest.TestCase):
             else:
                 self.assertIsNone(result)
 
+    def test_skipped_gouge_checks_still_check_fixtures(self):
+        outside = adsk.fusion.PointContainment.PointOutsidePointContainment
+        inside = adsk.fusion.PointContainment.PointInsidePointContainment
+        model = NS(pointContainment=lambda p: inside)  # the ball center is inside the part
+        fixture = NS(pointContainment=lambda p: outside)
+        cutter = NS(radius=.4, noncutting_sections=())
+        check = lf.Clearance(cutter, (0, 0, 1), [model], [], .02)
+        self.assertIn('enters model', check.point((0, 0, 0), .001))
+        check = lf.Clearance(cutter, (0, 0, 1), [model], [], .02, check_gouges=False)
+        self.assertIsNone(check.point((0, 0, 0), .001))
+        check = lf.Clearance(cutter, (0, 0, 1), [model], [fixture], .02, check_gouges=False)
+        check.measure = MagicMock()
+        check.measure.measureMinimumDistance.return_value.value = .39
+        self.assertIn('touches fixture', check.point((0, 0, 0), .001))
+
     def test_fixture_margin_does_not_spend_the_cutting_chord_tolerance(self):
         outside = adsk.fusion.PointContainment.PointOutsidePointContainment
         body = NS(pointContainment=lambda p: outside)
@@ -254,6 +269,17 @@ class ChamferCheckTests(unittest.TestCase):
         self.assertLess(limit, .05 + .003)
         result, _ = self.cone_check([(.04, 0, 0), (.3, 0, 0)], self.along_x)
         self.assertIn('away from the selected edges', result)
+
+    def test_skipped_gouge_checks_let_the_cone_cut_away_from_edges(self):
+        result, check = self.cone_check([(.04, 0, 0), (.3, 0, 0)], self.along_x)
+        self.assertIn('away from the selected edges', result)
+        body = NS()
+        check = lf.Clearance(self.CUTTER, (0, 0, 1), [body], [], .05, edges=['edge'],
+                             check_gouges=False)
+        check.temp = MagicMock()
+        with patch.object(lf, '_overlap', return_value=True):
+            self.assertIsNone(check.point((0, 0, 0), .001))
+        check.temp.createCylinderOrCone.assert_not_called()
 
     def test_cone_may_not_touch_fixtures(self):
         result, _ = self.cone_check([(0, 0, 0)], lambda p, limit: 0, fixture=True)
@@ -370,10 +396,14 @@ class ChamferWiringTests(unittest.TestCase):
     def test_cut_region_edges_are_sampled_and_prefiltered(self):
         # One selected edge along x at the origin; the removed region has an
         # edge whose stroke points run 0..0.04 cm away from it, then one at 0.3.
-        edge = NS(boundingBox=NS(minPoint=NS(x=-1, y=0, z=0), maxPoint=NS(x=1, y=0, z=0)))
-        far = NS(boundingBox=NS(minPoint=NS(x=5, y=5, z=5), maxPoint=NS(x=6, y=6, z=6)))
+        def line(a, b):
+            strokes = [NS(x=a[0], y=a[1], z=a[2]), NS(x=b[0], y=b[1], z=b[2])]
+            return NS(boundingBox=NS(minPoint=strokes[0], maxPoint=strokes[1]),
+                      evaluator=MagicMock(getParameterExtents=MagicMock(return_value=(True, 0, 1)),
+                                          getStrokes=MagicMock(return_value=(True, strokes))))
+        edge = line((-1, 0, 0), (1, 0, 0))
+        far = line((5, 5, 5), (6, 6, 6))
         measure = MagicMock()
-        measure.measureMinimumDistance.side_effect = lambda p, e: NS(value=math.hypot(p[1], p[2]))
         for reach, expected in ((.04, None), (.3, 'away from the selected edges')):
             stroke = [NS(x=0, y=0, z=0), NS(x=.1, y=reach, z=0)]
             cut_edge = NS(evaluator=NS(getParameterExtents=lambda: (True, 0, 1),
@@ -393,7 +423,51 @@ class ChamferWiringTests(unittest.TestCase):
                 else:
                     self.assertIsNone(result)
             # The far edge's box never reaches a distance measurement.
-            self.assertTrue(all(call.args[1] is edge for call in measure.measureMinimumDistance.call_args_list))
+            far.evaluator.getStrokes.assert_not_called()
+
+    def test_cut_region_past_the_end_of_a_straight_edge_is_away_from_it(self):
+        # measureMinimumDistance treats a straight BRepEdge as an infinite
+        # line; material removed past the end of the edge must still count.
+        strokes = [NS(x=-1, y=0, z=0), NS(x=1, y=0, z=0)]
+        edge = NS(boundingBox=NS(minPoint=strokes[0], maxPoint=strokes[1]),
+                  evaluator=NS(getParameterExtents=lambda: (True, 0, 1),
+                               getStrokes=lambda t0, t1, tol: (True, strokes)))
+        check = lf.Clearance(NS(radius=.6, noncutting_sections=(), frustums=((0, .3, .3, .6),)),
+                             (0, 0, 1), [NS()], [], .05, edges=[edge])
+        check.measure = MagicMock()
+        check.measure.measureMinimumDistance.return_value.value = 0  # an infinite line
+        self.assertIsNone(check._edge_distance((3, 0, 0), .1))
+        self.assertAlmostEqual(check._edge_distance((1.05, 0, 0), .1), .05)
+
+    def test_skipped_gouge_checks_still_fully_check_approach_moves(self):
+        cutter = NS(radius=.4, noncutting_sections=(), variants=lambda: [NS(name='ball', radius=.4)])
+        segment = lf.dc.Segment([(0, 0, 0), (1, 0, 0)], None, None, start_key=0, end_key=1)
+        made, access = [], []
+
+        def clearance(*args, **kwargs):
+            check = MagicMock(check_gouges=kwargs.get('check_gouges', True))
+            check.path.return_value = None
+            made.append(check)
+            return check
+
+        def add_access(points, directions, check, retreats=None):
+            access.append(check)
+            return points
+        with patch.object(lf, 'setup_edges', side_effect=lambda e, b: e), \
+                patch.object(lf, 'Clearance', side_effect=clearance), \
+                patch.object(lf, '_directions', return_value=[]), \
+                patch.object(lf, '_retreat_finder', return_value=None), \
+                patch.object(lf.df, 'edge_segment', return_value=segment), \
+                patch.object(lf.df, '_cut_depth') as depth, \
+                patch.object(lf, 'add_access', side_effect=add_access):
+            lf.build_chains([NS()], cutter, .05, (0, 0, 1), [], check_gouges=False)
+        checked = [c for c in made if c.check_gouges]
+        unchecked = [c for c in made if not c.check_gouges]
+        self.assertEqual((len(checked), len(unchecked)), (1, 1))
+        self.assertIs(access[0], checked[0])        # approach and withdrawal: full checks
+        unchecked[0].path.assert_called()           # the cutting path: gouge checks off
+        checked[0].path.assert_not_called()
+        depth.assert_not_called()                   # no corner depth check either
 
     def test_build_chains_runs_cones_without_ball_depth_and_offers_retreats(self):
         from FusionFreeDeburr import cutter_profile as cp

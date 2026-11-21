@@ -89,6 +89,7 @@ class CommandJobTests(unittest.TestCase):
         self.assertEqual(job.edges, picked)
         self.assertEqual(job.width, .025)
         self.assertTrue(job.keep_current_tool)
+        self.assertFalse(job.skip_gouge_checks)  # no explicit tick
 
     def test_old_dialog_destroy_does_not_clear_new_session(self):
         older = NS(job=object())
