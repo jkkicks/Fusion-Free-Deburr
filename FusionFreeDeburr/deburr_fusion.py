@@ -220,6 +220,7 @@ EDGE_DISTANCE_TOL = 1e-4   # cm; chord tolerance of the edge shapes measured aga
 CUT_SAMPLE_TOL = PATH_TOL  # cm; stroke tolerance when sampling the material a ball removes
 CUT_MESH_SIDE = .25        # longest mesh side over the removed material, as a fraction of the width
 LOOP_OVERLAP = 0.01        # cm; a closed ball loop is cut this far past its start, so its ends differ
+BREAK_KEPT_TOL = 0.001     # cm; a kept path this close to an edge's tool tips still breaks it
 CUT_MESH_BUDGET = 200000   # most triangles meshed over one ball's (or plunge's) removed material
 INSIDE_STEP = .25          # steps into the removed material, as a fraction of the width
 
@@ -436,9 +437,10 @@ def _trim_gouges(chain, excess, column, width):
     Returns (paths, removed, lost, notes): the clear polylines, which must
     stay separate open contours (a closed loop is continued LOOP_OVERLAP
     past its start), one (length, deepest excess) per stretch removed for
-    cutting too far (math.inf when no depth was measured), how many of the
-    chain's polylines were removed whole, and notes on path removed for
-    other reasons."""
+    cutting too far (math.inf when no depth was measured), one reason per
+    polyline removed whole (its own deepest excess, or a note when it was
+    dropped for another reason), and notes on path removed for other
+    reasons."""
     limit = gouge_limit(width)
 
     def swept(a, b):
@@ -446,7 +448,7 @@ def _trim_gouges(chain, excess, column, width):
         middle = dm.scale(dm.add(a, b), .5)
         return excess(middle, dc.dist(a, b) / 2, limit) <= limit
     paths = dc.chain_polylines(chain)
-    kept, removed, lost, notes, opened = [], [], 0, [], 0.0
+    kept, removed, lost, notes, opened = [], [], [], [], 0.0
     for points in paths:
         # Only whether a point is over the limit matters, so its check stops
         # at the first sample beyond it: removed depths are lower bounds.
@@ -462,7 +464,7 @@ def _trim_gouges(chain, excess, column, width):
             # One blocked stretch across the seam, reported in two parts.
             (a, da), (b, db) = cut[0], cut[-1]
             cut = [(a + b, max(da, db))] + cut[1:-1]
-        ends = []
+        ends, why = [], 'no clear stretch'
         for span in spans:
             # Trace may start a closed contour anywhere; an open one starts
             # where it is drawn, so only its two ends need a clear plunge.
@@ -483,16 +485,20 @@ def _trim_gouges(chain, excess, column, width):
                     back, column, limit, SAMPLE_STEP, limit / 8)
                 cut = cut + moved
             if closed(shortened):
-                notes.append('a path too short to cut as an open contour was dropped')
+                why = 'a path too short to cut as an open contour was dropped'
+                notes.append(why)
                 shortened = None
             if shortened is not None and (column(shortened[0]) > limit or column(shortened[-1]) > limit):
                 # The exported ends are the ones Trace plunges to: check them as they are.
-                notes.append('a path whose exported ends could not be plunged to was dropped')
+                why = 'a path whose exported ends could not be plunged to was dropped'
+                notes.append(why)
                 shortened = None
             if shortened is not None:
                 ends.append(shortened)
         if not ends:
-            lost += 1
+            # This path's own reason: its deepest cut, or why it was dropped.
+            depths = [d for _, d in cut]
+            lost.append(max(depths) if depths else why)
         kept.extend(ends)
         removed.extend(cut)
     if opened:
@@ -567,19 +573,27 @@ def build_chains(edges, radius, width, tool_axis, log=None, check_gouges=True):
         # One open chain per clear path, so nothing rejoins them across a
         # trim and Trace starts each where its plunge was checked.
         chains.extend(dc.Chain(pieces=[dc.Piece(p)]) for p in paths)
-        measured = [d for _, d in removed if not math.isinf(d)]
-        if measured:
-            why = (f'the ball, or the plunge onto it, would cut at least {max(measured) * 10:.3f} mm '
-                   f'beyond the edge break')
-        else:
-            why = "the ball's center would be inside the part"
+        def reason(depths):
+            measured = [d for d in depths if not math.isinf(d)]
+            if measured:
+                return (f'the ball, or the plunge onto it, would cut at least '
+                        f'{max(measured) * 10:.3f} mm beyond the edge break')
+            return "the ball's center would be inside the part"
+        why = reason([d for _, d in removed])
+        whole = [reason([r]) + ' along the whole path' if not isinstance(r, str) else r
+                 for r in lost]
         if not paths:
-            warnings.append(f'{label} skipped: ' + (f'{why} along the whole path' if removed
-                                                     else '; '.join(notes)))
+            warnings.append(f'{label} skipped: ' + '; '.join(dict.fromkeys(whole)))
             continue
         if lost:
-            warnings.append(f'{label}: {lost} of the paths skipped: ' +
-                            (f'{why} along their whole length' if removed else '; '.join(notes)))
+            warnings.append(f'{label}: {len(lost)} of the paths skipped: ' +
+                            '; '.join(dict.fromkeys(whole)))
+        # An edge inside a longer path can lose its whole break while the
+        # path survives on its neighbours: that edge is left sharp.
+        for s in ordered:
+            middle = s.tips[len(s.tips) // 4:len(s.tips) - len(s.tips) // 4] or s.tips
+            if not any(dc.polyline_distance(t, p) <= BREAK_KEPT_TOL for t in middle for p in paths):
+                warnings.append(f'Edge {numbers[id(s.source)]}: no break left; {why} along it')
         if log:
             if removed:
                 length = sum(l for l, _ in removed) * 10

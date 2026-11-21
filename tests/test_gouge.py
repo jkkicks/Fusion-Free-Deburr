@@ -402,7 +402,7 @@ class TrimTests(unittest.TestCase):
         paths, removed, lost = self.trim(self.LOOP, lambda p: abs(p[1] - 1) < 1e-9 and .4 < p[0] < .6,
                                          closed=True)
         self.assertEqual(len(paths), 1)       # one open path, cut only at the gouge
-        self.assertEqual((len(removed), lost), (1, 0))
+        self.assertEqual((len(removed), lost), (1, []))
         self.assertAlmostEqual(paths[0][0][0], .4, delta=4 * dc.TRIM_TOL)
         self.assertAlmostEqual(paths[0][-1][0], .6, delta=4 * dc.TRIM_TOL)
 
@@ -453,7 +453,7 @@ class TrimTests(unittest.TestCase):
         # Review case, confirmed in Fusion: Trace moves the seam of a closed
         # contour, so a loop is cut a little past its start instead.
         paths, removed, lost = self.trim(self.LOOP, lambda p: False, closed=True)
-        self.assertEqual((len(paths), removed, lost), (1, [], 0))
+        self.assertEqual((len(paths), removed, lost), (1, [], []))
         self.assertEqual(paths[0][0], self.LOOP[0])
         self.assertAlmostEqual(dc.dist(paths[0][0], paths[0][-1]), fusion.LOOP_OVERLAP)
 
@@ -464,7 +464,7 @@ class TrimTests(unittest.TestCase):
         overlap_end = lambda p: p[1] == 0 and 0 < p[0] <= fusion.LOOP_OVERLAP + 1e-9
         paths, removed, lost = self.trim(self.LOOP, lambda p: False, closed=True,
                                          plunge_blocked=overlap_end)
-        self.assertEqual((len(paths), lost), (1, 0))
+        self.assertEqual((len(paths), lost), (1, []))
         self.assertGreaterEqual(dc.dist(paths[0][0], paths[0][-1]), fusion.LOOP_OVERLAP / 2)
         # The overlap's failing plunge is a gouge; the cut-back that keeps the
         # loop open is only a note.
@@ -476,7 +476,7 @@ class TrimTests(unittest.TestCase):
         # clear, but the column it plunges down is wider than the ball.
         line = [(0.0, 0, 0), (1.0, 0, 0)]
         paths, removed, lost = self.trim(line, lambda p: False, plunge_blocked=lambda p: p[0] > .8)
-        self.assertEqual((len(paths), lost), (1, 0))
+        self.assertEqual((len(paths), lost), (1, []))
         self.assertEqual(paths[0][0], (0.0, 0, 0))
         self.assertAlmostEqual(paths[0][-1][0], .8, delta=.01)
         self.assertEqual(len(removed), 1)
@@ -486,19 +486,48 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertGreater(dc.dist(paths[0][0], paths[0][-1]), .1)
 
+    def test_edge_trimmed_away_inside_a_surviving_path_is_a_warning(self):
+        # Review case: edges A and B form one path; trimming removes all of A
+        # but keeps B, so no path is lost, yet A is left sharp.
+        a, b = NS(body='part'), NS(body='part')
+        seg_a = dc.Segment([(0, 0, 0), (.5, 0, 0), (1, 0, 0)], None, None, source=a)
+        seg_b = dc.Segment([(1, 0, 0), (1.5, 0, 0), (2, 0, 0)], None, None, source=b)
+        chain = dc.Chain(pieces=[dc.Piece([(0, 0, 0), (1, 0, 0), (2, 0, 0)])])
+        with patch.object(fusion, 'edge_segment', side_effect=[seg_a, seg_b]), \
+                patch.object(fusion, '_cut_depth'), patch.object(fusion, '_excess'), \
+                patch.object(fusion, '_column_excess'), \
+                patch.object(fusion, '_edge_polyline', return_value=[(0, 0, 0), (2, 0, 0)]), \
+                patch.object(dc, 'order_chains', return_value=[([seg_a, seg_b], False)]), \
+                patch.object(dc, 'link_chain', return_value=chain), \
+                patch.object(fusion, '_trim_gouges',
+                             return_value=([[(1.2, 0, 0), (2, 0, 0)]], [(1.2, .1)], [], [])):
+            chains, _, warnings = fusion.build_chains([a, b], self.R, .05, Z)
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('Edge 1: no break left', warnings[0])
+
+    def test_each_lost_path_gives_its_own_reason(self):
+        # Review case: one path dropped for gouging, another only for being
+        # too short to stay open; neither borrows the other's reason.
+        _, _, warnings = self.build(([[(0, 0, 0), (1, 0, 0)]], [(.2, .1)],
+                                     [.1, 'a path too short to cut as an open contour was dropped']))
+        self.assertIn('2 of the paths skipped', warnings[0])
+        self.assertIn('1.000 mm beyond the edge break along the whole path', warnings[0])
+        self.assertIn('too short to cut as an open contour', warnings[0])
+
     def test_messages_never_invent_a_depth(self):
         # Review case: a center-inside rejection has no measured depth.
-        _, _, warnings = self.build(([], [(1, math.inf)], 1))
+        _, _, warnings = self.build(([], [(1, math.inf)], [math.inf]))
         self.assertIn("center would be inside the part", warnings[0])
         self.assertNotIn('mm beyond', warnings[0])
         # A path dropped only for being too short says so.
-        _, _, warnings = self.build(([], [], 1, ['a path too short to cut as an open contour was dropped']))
+        _, _, warnings = self.build(([], [], ['a path too short to cut as an open contour was dropped'], []))
         self.assertIn('too short', warnings[0])
         self.assertNotIn('mm beyond', warnings[0])
 
     def test_whole_path_lost_from_a_split_chain_is_a_warning(self):
         logged = []
-        chains, _, warnings = self.build(([[(0, 0, 0), (1, 0, 0)]], [(.2, .1), (1, .1)], 1),
+        chains, _, warnings = self.build(([[(0, 0, 0), (1, 0, 0)]], [(.2, .1), (1, .1)], [.1]),
                                          logged.append)
         self.assertEqual(len(chains), 1)
         self.assertTrue(any('paths skipped' in w for w in warnings))
@@ -507,7 +536,7 @@ class TrimTests(unittest.TestCase):
     def test_trimming_is_logged_but_a_fully_blocked_chain_is_a_warning(self):
         for paths, expect_warning in (([[(.2, 0, 0), (1, 0, 0)]], False), ([], True)):
             logged = []
-            chains, _, warnings = self.build((paths, [(.2, .1)], 0 if paths else 1), logged.append)
+            chains, _, warnings = self.build((paths, [(.2, .1)], [] if paths else [.1]), logged.append)
             self.assertEqual(len(chains), 0 if expect_warning else 1)
             self.assertEqual(bool(warnings), expect_warning)
             self.assertEqual(bool(logged), not expect_warning)

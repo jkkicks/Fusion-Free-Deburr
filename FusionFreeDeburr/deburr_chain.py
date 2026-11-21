@@ -470,7 +470,7 @@ class SegmentIndex:
 _NEIGHBOURS = [(i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)]
 
 
-def inward_points(nodes, normals, samples, depth, steps=(1, 2, 4, 8)):
+def inward_points(nodes, normals, samples, depth, steps=(1, 2, 3, 4, 6, 8)):
     """Candidate points deep inside a solid sampled on its surface: from one
     surface node per `depth`-sized cell, step `depth` times each of `steps`
     against its outward normal, and keep the points whose cell and its 26

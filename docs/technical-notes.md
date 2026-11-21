@@ -51,7 +51,9 @@ limit long that still fails is clear if both its ends pass, and removed
 otherwise, so trims land within an eighth of the limit and only a failed point
 check counts as a gouge; a blocked stretch in the middle splits the contour.
 Each clear stretch is its own contour so trims are never bridged, and a trim
-point next to a path point gives way to the path point. Points between mesh
+point next to a path point gives way to the path point. A selected edge that
+keeps no break at all, even inside a path that survives on its neighbours,
+gets a warning, as does each path lost whole, with its own reason. Points between mesh
 nodes are not measured: a point inside a mesh triangle can lie up to about 0.15
 times the width farther from the selected edges than the nearest node (more
 for breaks under 0.04 mm, where the mesh side is held at 0.01 mm), so a face
@@ -67,13 +69,14 @@ when selected edges surround the material, for example a ball swallowing a
 small feature whose edges are all selected. A ball whose center would lie
 inside the part fails outright, and points inside the material are sampled
 too: from the part's own faces (not the ball's or the plunge column's),
-steps of a quarter, half, one and two widths along the inward mesh normal
+steps every quarter width down to one width, then at one and a half and two
+widths, along the inward mesh normal
 that land inside the tool, in no grid cell (a quarter width across) next to
 one holding a surface sample, and inside the material by a containment test
 (`inward_points`). In practice the first counted point is about half a width
 deep, so the core of a swallowed feature is sampled once it is about one width
-thick; thinner than that, its core can be cut by up to about a quarter of a
-width beyond the limit unseen. A move no longer than an eighth of the
+thick; thinner than that, or between sampled points, its core can be cut
+somewhat beyond the limit unseen. A move no longer than an eighth of the
 limit whose ends pass can still differ from its end balls by at most a
 sixteenth of the limit (a few micrometres for a 0.25 mm break, about
 0.06 mm for a 10 mm break).
@@ -437,7 +440,7 @@ above it. The chamfer check with stroked edge distances, through the API on a
 step block with a 10 mm 90 degree chamfer mill and 0.5 mm width, accepted a top
 edge ending at two outside corners and rejected one running into the step's
 wall ("cutter removes material away from the selected edges"). With the inside
-samples, the user's part took 11.5 to 14 s. A hole-rim loop exported open
+samples, the user's part took 11.5 to 15 s. A hole-rim loop exported open
 started and ended at its checked start in the posted toolpath. A 12 mm ball on
 a 4 mm hole with a 0.02 mm break was skipped with a warning in 1.9 s. In a scratch document, through the API: a 20 degree ramp into a
 floor in a component moved 3 cm and turned 30 degrees lost 1.54 mm of path
