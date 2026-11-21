@@ -4,6 +4,7 @@ All lengths are in cm."""
 
 import json
 import math
+import re
 
 import adsk.core
 import adsk.fusion
@@ -16,6 +17,11 @@ SAMPLE_STEP = 0.05          # max edge/clearance sample spacing (0.5 mm)
 PATH_TOL = 0.001           # tool-tip chord tolerance (0.01 mm)
 CONVEXITY_PROBE = 0.005     # lateral probe distance for convexity
 VERTEX_TOL = 1e-4           # cm; vertices this close are treated as the same
+PARAMETER_ROUNDOFF = 1e-4   # fraction of an edge's parameter range a lookup may be out of order
+NEWTON_STEPS = 8            # Newton steps matching a sample to its parameter
+SAMPLE_MATCH_TOL = PATH_TOL / 2  # cm; a parameter is a sample's own if its point is this close
+CLOSED_SPLITS = (.5, 1 / 3, 2 / 3, .25, .75)  # where a closed edge may be split: shares of its range or length
+CLOSED_SPLIT_GAP = 10 * VERTEX_TOL  # cm; the split point must be this far from the seam
 TRACE_STRATEGY = 'trace'
 TRACE_EXPRESSIONS = (
     ('compensation', "'center'"), ('compensationType', "'off'"),
@@ -38,6 +44,12 @@ def _tup(v):
     return (v.x, v.y, v.z)
 
 
+def _is_fusion_error(error):
+    """Whether `error` was raised by the Fusion API ("3 : invalid argument
+    parameter"), which raises instead of returning ok=False for some inputs."""
+    return isinstance(error, RuntimeError) and re.match(r'\d+ : ', str(error)) is not None
+
+
 def _is_line_between_planes(edge: adsk.fusion.BRepEdge) -> bool:
     if edge.geometry.curveType != adsk.core.Curve3DTypes.Line3DCurveType:
         return False
@@ -53,19 +65,65 @@ def _vertex_key(vertex: adsk.fusion.BRepVertex):
     return tuple(round(c / VERTEX_TOL) for c in _tup(vertex.geometry))
 
 
-def _sample_edge(edge: adsk.fusion.BRepEdge, straight: bool):
+def _sample_edge(edge: adsk.fusion.BRepEdge, straight: bool, closed=False):
+    """Points along the edge in parameter order, t0 to t1."""
     ev = edge.evaluator
     _, t0, t1 = ev.getParameterExtents()
     if straight:
         return [_tup(ev.getPointAtParameter(t)[1]) for t in (t0, t1)]
-    ok, points = ev.getStrokes(t0, t1, 0.001)  # 0.01 mm chord tolerance
+    if not closed:
+        return _ordered_strokes(ev, t0, t1)
+    # Both ends of a closed edge are on its seam, so its strokes' ends can't
+    # show which way they run (nor can point lookups: at the seam they can
+    # give t0 or t1, and on a full circle Fusion returns 0 past half way).
+    # Stroke it in two parts split away from the seam, each with two
+    # distinct ends, and order each part by them.
+    ok, seam = ev.getPointAtParameter(t0)
+    if not ok:
+        raise dm.DeburrError('could not evaluate edge start')
+    seam = _tup(seam)
+    # Split by parameter and by length: a spline's parameters can bunch up
+    # near its seam, and length can't.
+    candidates = [t0 + (t1 - t0) * share for share in CLOSED_SPLITS]
+    try:  # best effort: the parameter shares may already be enough
+        ok, total = ev.getLengthAtParameter(t0, t1)
+        if ok and total > 0:
+            for share in CLOSED_SPLITS:
+                ok, t = ev.getParameterAtLength(t0, total * share)
+                if ok and t0 < t < t1:
+                    candidates.append(t)
+    except RuntimeError as e:
+        if not _is_fusion_error(e):
+            raise
+    split = None
+    for t in candidates:
+        ok, p = ev.getPointAtParameter(t)
+        if ok and (split is None or dc.dist(_tup(p), seam) > split[0]):
+            split = (dc.dist(_tup(p), seam), t)
+    if split is None or split[0] <= CLOSED_SPLIT_GAP:
+        raise dm.DeburrError('closed edge is too small to sample')
+    first, second = _ordered_strokes(ev, t0, split[1]), _ordered_strokes(ev, split[1], t1)
+    return first + second[1:]
+
+
+def _ordered_strokes(ev, a, b):
+    """The edge's strokes from parameter a to b, P(a) first. getStrokes can
+    return them from b back to a (seen on edges whose parameters run against
+    their curve), and _refine_samples pairs them with parameters in order."""
+    ok, points = ev.getStrokes(a, b, 0.001)  # 0.01 mm chord tolerance
     if not ok or len(points) < 2:
         raise dm.DeburrError('could not sample edge')
-    return [_tup(p) for p in points]
+    points = [_tup(p) for p in points]
+    ok, start = ev.getPointAtParameter(a)
+    if not ok:
+        raise dm.DeburrError('could not evaluate edge start')
+    start = _tup(start)
+    return points[::-1] if dc.dist(points[-1], start) < dc.dist(points[0], start) else points
 
 
 def _refine_samples(edge, samples, radius, width, tool_axis, cutter=None):
-    """Split long spans or spans whose tool-tip midpoint misses the chord."""
+    """Split long spans or spans whose tool-tip midpoint misses the chord.
+    `samples` must run from parameter t0 to t1 (see _sample_edge)."""
     ev = edge.evaluator
     f1, f2 = edge.faces.item(0), edge.faces.item(1)
 
@@ -91,17 +149,99 @@ def _refine_samples(edge, samples, radius, width, tool_axis, cutter=None):
     ok, t0, t1 = ev.getParameterExtents()
     if not ok:
         raise dm.DeburrError('could not evaluate edge parameters')
-    parameters = [t0]
-    for p in samples[1:-1]:
-        ok, t = ev.getParameterAtPoint(adsk.core.Point3D.create(*p))
-        if not ok:
-            raise dm.DeburrError('could not evaluate sample parameters')
-        parameters.append(t)
-    parameters.append(t1)  # at a closed seam, point lookup could return t0 instead
+    parameters = _lookup_parameters(ev, samples, t0, t1)
+    if parameters is None:
+        # Fusion's point lookup on a full circle returns 0 for every point
+        # past half way (Fusion 2706.1.17), so go by length along the edge.
+        samples, parameters = _length_parameters(ev, samples, t0, t1)
     points = []
     for a, b, pa, pb in zip(samples, samples[1:], parameters, parameters[1:]):
         points.extend(split(a, b, pa, pb, tip(a), tip(b), 0))
     return points + samples[-1:]
+
+
+def _lookup_parameters(ev, samples, t0, t1):
+    """Each sample's parameter by point lookup, or None if any is out of
+    order or is not the sample's point. Paired with the wrong parameters,
+    refinement would check the wrong part of the edge; outside [t0, t1],
+    Fusion raises."""
+    parameters = [t0]
+    # A lookup can land a hair outside the order by rounding: before the
+    # previous sample or past t1. It is clamped into order (this mostly
+    # matters on tiny parameter ranges); anything more is a wrong pairing.
+    roundoff = (t1 - t0) * PARAMETER_ROUNDOFF + 4 * math.ulp(max(abs(t0), abs(t1)))
+    for p in samples[1:-1]:
+        try:
+            ok, t = ev.getParameterAtPoint(adsk.core.Point3D.create(*p))
+        except RuntimeError as e:
+            if not _is_fusion_error(e):
+                raise
+            ok = False
+        if not ok:
+            return None
+        if not parameters[-1] <= t <= t1:
+            clamped = min(max(t, parameters[-1]), t1)
+            if abs(t - clamped) > roundoff:
+                return None
+            t = clamped
+        # In order is not enough: the parameter must be the sample's own
+        # point (a lookup that returns 0 for every point is in order).
+        ok, q = ev.getPointAtParameter(t)
+        if not ok or dc.dist(_tup(q), p) > SAMPLE_MATCH_TOL:
+            return None
+        parameters.append(t)
+    return parameters + [t1]  # at a closed seam, point lookup could return t0 instead
+
+
+def _length_parameters(ev, samples, t0, t1):
+    """(samples, parameters) without point lookups: each interior sample's
+    share of the strokes' length, as the same share of the edge's length,
+    gives a first guess that Newton steps along the edge move onto the
+    sample. Each must land within SAMPLE_MATCH_TOL of its sample, in order, or
+    the edge is rejected. Samples move onto the edge at their parameter."""
+    ok, total = ev.getLengthAtParameter(t0, t1)
+    chords = [dc.dist(a, b) for a, b in zip(samples, samples[1:])]
+    run = sum(chords)
+    if not ok or total <= 0 or run <= 0:
+        raise dm.DeburrError('edge samples are out of parameter order')
+    points, parameters, along = [samples[0]], [t0], 0.0
+    for i, p in enumerate(samples[1:-1]):
+        along += chords[i]
+        ok, t = ev.getParameterAtLength(t0, total * along / run)
+        if not ok:
+            raise dm.DeburrError('edge samples are out of parameter order')
+        t, q = _nearest_parameter(ev, p, min(max(t, t0), t1), t0, t1)
+        if q is None or t < parameters[-1] or dc.dist(q, p) > SAMPLE_MATCH_TOL:
+            raise dm.DeburrError('edge samples are out of parameter order')
+        points.append(q)
+        parameters.append(t)
+    return points + samples[-1:], parameters + [t1]
+
+
+def _nearest_parameter(ev, p, t, t0, t1, steps=NEWTON_STEPS):
+    """(t, point) after Newton steps from `t` toward the point of the edge
+    nearest `p`, kept inside [t0, t1]; point is None if Fusion can't say.
+    The caller judges the point: the steps stop early on the sample itself,
+    or where the derivative can't give a step."""
+    for _ in range(steps):
+        ok, point = ev.getPointAtParameter(t)
+        if not ok:
+            return t, None
+        q = _tup(point)
+        if dc.dist(q, p) == 0:
+            break
+        ok, d = ev.getFirstDerivative(t)
+        d = _tup(d) if ok else (0, 0, 0)
+        speed = dm.dot(d, d)
+        if speed <= 0:
+            break
+        step = dm.dot(dm.sub(p, q), d) / speed
+        nxt = min(max(t + step, t0), t1)
+        if nxt == t:
+            break
+        t = nxt
+    ok, point = ev.getPointAtParameter(t)
+    return t, _tup(point) if ok else None
 
 
 def _normal(face: adsk.fusion.BRepFace, p):
@@ -144,6 +284,17 @@ def edge_segment(edge: adsk.fusion.BRepEdge, radius, width, tool_axis, face_ids,
                  cutter=None) -> dc.Segment:
     """Tool-tip path for one edge, oriented start vertex -> end vertex.
     Raises DeburrError if the edge can't be done."""
+    try:
+        return _edge_segment(edge, radius, width, tool_axis, face_ids, cutter)
+    except RuntimeError as e:
+        # A Fusion evaluator failing on this edge fails the edge, not the
+        # operation. Other errors are bugs and keep their traceback.
+        if not _is_fusion_error(e):
+            raise
+        raise dm.DeburrError(f'Fusion could not evaluate the edge ({e})') from e
+
+
+def _edge_segment(edge, radius, width, tool_axis, face_ids, cutter):
     if edge.faces.count != 2:
         raise dm.DeburrError('edge does not have exactly two faces')
     f1, f2 = edge.faces.item(0), edge.faces.item(1)
@@ -151,9 +302,13 @@ def edge_segment(edge: adsk.fusion.BRepEdge, radius, width, tool_axis, face_ids,
 
     straight = _is_line_between_planes(edge)
     closed = _is_closed(edge)
-    samples = _sample_edge(edge, straight)
+    samples = _sample_edge(edge, straight, closed)
     if closed:
-        samples = dc._clean(samples)
+        # Drop near-duplicate points but keep both ends: they are P(t0) and
+        # P(t1), which _refine_samples pairs with t0 and t1.
+        samples = dc._clean(samples[:-1]) + samples[-1:]
+        if len(samples) > 2 and dc.dist(samples[-2], samples[-1]) <= dc.JOIN_TOL:
+            del samples[-2]
         if len(samples) < 4 or len(set(samples[:-1])) < 3:
             raise dm.DeburrError('closed edge has too few sample points')
     if not straight:
@@ -226,14 +381,19 @@ INSIDE_STEP = .25          # steps into the removed material, as a fraction of t
 
 
 def _edge_polyline(edge):
-    """The edge as points on it, start to end, within EDGE_DISTANCE_TOL.
+    """The edge as points on it, in either direction, within EDGE_DISTANCE_TOL.
 
     measureMinimumDistance to a BRepEdge measures to the unbounded curve (a
     straight edge reads as an infinite line), so distances to an edge are
     taken from this polyline instead."""
-    ev = edge.evaluator
-    ok, t0, t1 = ev.getParameterExtents()
-    ok, points = ev.getStrokes(t0, t1, EDGE_DISTANCE_TOL) if ok else (False, [])
+    try:
+        ev = edge.evaluator
+        ok, t0, t1 = ev.getParameterExtents()
+        ok, points = ev.getStrokes(t0, t1, EDGE_DISTANCE_TOL) if ok else (False, [])
+    except RuntimeError as e:
+        if not _is_fusion_error(e):
+            raise
+        ok = False
     if not ok or len(points) < 2:
         raise dm.DeburrError('could not sample a selected edge for the gouge check')
     return [_tup(p) for p in points]
@@ -782,19 +942,29 @@ def find_by_token(design: adsk.fusion.Design, token, cast):
 
 def edge_shape(edge: adsk.fusion.BRepEdge):
     """[length, point, ...] of an edge in model space, or None: its length and
-    dc.EDGE_SHAPE_POINTS points evenly spaced in parameter, start to end."""
-    ev = edge.evaluator
-    ok, t0, t1 = ev.getParameterExtents()
-    if not ok:
-        return None
-    points = []
-    last = dc.EDGE_SHAPE_POINTS - 1
-    for i in range(last + 1):
-        ok, p = ev.getPointAtParameter(t0 + (t1 - t0) * i / last)
+    dc.EDGE_SHAPE_POINTS points evenly spaced in parameter, start to end.
+
+    The shape is optional (None only means the edge cannot be found again by
+    shape), so a Fusion error here never fails the operation."""
+    try:
+        ev = edge.evaluator
+        ok, t0, t1 = ev.getParameterExtents()
         if not ok:
             return None
-        points.append(list(_tup(p)))
-    return [edge.length] + points
+        points = []
+        last = dc.EDGE_SHAPE_POINTS - 1
+        for i in range(last + 1):
+            # The end is t1 itself: t0 + (t1 - t0) can round past t1, and
+            # Fusion raises for a parameter outside the edge.
+            ok, p = ev.getPointAtParameter(t1 if i == last else t0 + (t1 - t0) * i / last)
+            if not ok:
+                return None
+            points.append(list(_tup(p)))
+        return [edge.length] + points
+    except RuntimeError as e:
+        if not _is_fusion_error(e):
+            raise
+        return None
 
 
 def setup_model_edges(setup: adsk.cam.Setup):

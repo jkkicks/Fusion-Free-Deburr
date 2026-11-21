@@ -69,6 +69,7 @@ class SafetyTests(unittest.TestCase):
     def test_adaptive_strokes_requested_and_failures_rejected(self):
         ev = MagicMock()
         ev.getParameterExtents.return_value = (True, 0, 1)
+        ev.getPointAtParameter.side_effect = lambda t: (True, NS(x=t, y=0, z=0))
         ev.getStrokes.return_value = (True, [NS(x=0, y=0, z=0), NS(x=1, y=0, z=0)])
         self.assertEqual(len(fusion._sample_edge(NS(evaluator=ev), False)), 2)
         ev.getStrokes.assert_called_once_with(0, 1, .001)
